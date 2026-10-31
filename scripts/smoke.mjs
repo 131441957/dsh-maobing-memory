@@ -1,0 +1,517 @@
+// 骨架冒烟：不启动 DSH，直接验证两件产物「能不能被宿主正常用」。
+//   node scripts/smoke.mjs
+// host 侧：加载 lib/index.js → 造一个假 ctx → apply → 检查工具注册与数据库读写。
+// client 侧：用 vm 模拟 window.__ModuleLoader__ → 检查 apply 是否注册了两个槽位。
+import { existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import vm from 'node:vm'
+
+const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
+let failed = 0
+const ok = (cond, label) => {
+  console.log(`${cond ? '  ok  ' : ' FAIL '} ${label}`)
+  if (!cond) failed++
+}
+
+// ── host ────────────────────────────────────────────────────────────────
+process.env.DSH_HOME = mkdtempSync(join(tmpdir(), 'mbm-smoke-'))
+const host = await import(new URL('../lib/index.js', import.meta.url).href)
+ok(host.name === 'dsh-maobing-memory', 'host: name 导出正确')
+ok(typeof host.apply === 'function', 'host: apply 是函数')
+ok(typeof host.config === 'function', 'host: config schema 可用')
+
+const registered = new Map()
+const handlers = new Map()
+const logs = []
+const ctx = {
+  logger: { info: (m) => logs.push(m), debug: (m) => logs.push(m), warn: (m) => logs.push(m) },
+  tools: { register: (def) => { registered.set(def.name, def); return () => registered.delete(def.name) } },
+  on: (name, fn) => { handlers.set(name, fn); return () => {} },
+  get: () => undefined,
+}
+await host.apply(ctx, {})
+ok(registered.has('memory_remember'), 'host: 注册了 memory_remember')
+ok(registered.has('memory_recent'), 'host: 注册了 memory_recent')
+const hostLogPath = join(process.env.DSH_HOME, 'storages', 'maobing-memory', 'maobing-memory.log')
+const hostLogText = existsSync(hostLogPath) ? readFileSync(hostLogPath, 'utf8') : ''
+ok(hostLogText.includes('启动：版本'), 'host: 启动日志已写进自己的日志文件')
+ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具数')
+
+// 配置解析：每个 schema 字段都必须在 resolveConfig 里被读到，否则会静默用兜底值
+{
+  const srcText = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+  // 用宽松匹配：任意缩进都算（字段可能因为嵌套 group 或格式化而缩进变化），
+  // 只要能写成 `xxx: z.…` 就抓。早期版本写死「恰好两个空格」，字段一旦缩进变形整条断言就白设了。
+  const schemaStart = srcText.indexOf('export const config = z.object({')
+  const schemaEnd = srcText.indexOf('\n})', schemaStart)
+  const schemaBlock = schemaStart >= 0 && schemaEnd > schemaStart ? srcText.slice(schemaStart, schemaEnd) : ''
+  const schemaFields = [...schemaBlock.matchAll(/^\s*(\w+):\s*(?:z\.|typeof)/gm)].map((m) => m[1])
+  const resolveBlock = srcText.slice(srcText.indexOf('function resolveConfig'), srcText.indexOf('export async function apply'))
+  // 关键：先把注释剥掉再检查。否则把解析逻辑注释掉，`src.xxx` 还留在注释里，
+  // includes 照样命中 —— 断言就成了摆设（2026-10-31 变异测试抓到的第二个坑）。
+  const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\n)\s*\/\/[^\n]*/g, '$1')
+  const resolveClean = stripComments(resolveBlock)
+  // 不再豁免任何字段：enabled 在 resolveConfig 里本来就有 src.enabled，跳过它等于白白少查一个。
+  const missing = [...new Set(schemaFields)].filter((f) => !resolveClean.includes(`src.${f}`))
+  ok(schemaFields.length >= 8, `config: 抓到 schema 字段（${schemaFields.length} 个：${schemaFields.join(',')}）`)
+  ok(missing.length === 0, `config: resolveConfig 覆盖所有字段（缺: ${missing.join(',') || '无'}）`)
+  // 自检：剥注释函数必须真的能剥掉东西，否则上面的检查又会退化成"注释也算命中"
+  ok(stripComments('  // src.foo\n  bar: 1') === '\n  bar: 1', 'config: 注释剥离自检')
+}
+
+// dream 的 dryRun 必须真的不写库（否则「空跑」会变成「骗人跑一次」）
+{
+  const { DatabaseSync: DryDb } = await import('node:sqlite')
+  const dryPath = join(process.env.DSH_HOME, 'storages', 'maobing-memory', 'memory.db')
+  const dryDb = new DryDb(dryPath)
+  const before = dryDb.prepare("SELECT COUNT(*) AS n FROM dream_log").get().n
+  const beforeMeta = dryDb.prepare("SELECT value FROM meta WHERE key='lastDreamDay'").get()?.value ?? null
+  const dry = host.decayAndArchive(dryDb, { dryRun: true })
+  const after = dryDb.prepare("SELECT COUNT(*) AS n FROM dream_log").get().n
+  const afterMeta = dryDb.prepare("SELECT value FROM meta WHERE key='lastDreamDay'").get()?.value ?? null
+  dryDb.close()
+  ok(dry.dryRun === true, 'dream: 空跑结果带 dryRun 标记')
+  ok(before === after, `dream: 空跑不写 dream_log（${before} -> ${after}）`)
+  ok(beforeMeta === afterMeta, 'dream: 空跑不写 meta.lastDreamDay')
+  ok(dry.log.length >= 0, `dream: 空跑仍算出将要动 ${dry.decayed + dry.archived} 条`)
+}
+
+// 路由清单必须与源码里实际判断的路径一致（防止清单再次写死/漂移）
+{
+  const srcText = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+  const actual = [...srcText.matchAll(/url\.pathname === '\/maobing-memory\/([^']+)'/g)]
+    .map((m) => m[1])
+    .sort()
+  const declared = [...host.HTTP_ROUTES].sort()
+  ok(actual.length > 0, `routes: 源码里能提取到路由（${actual.length} 个）`)
+  ok(
+    JSON.stringify(actual) === JSON.stringify(declared),
+    `routes: HTTP_ROUTES 与源码一致（声明 ${declared.length} / 实际 ${actual.length}）`,
+  )
+}
+
+
+const remember = registered.get('memory_remember')
+const res = await remember.execute(
+  { judgment: '冒烟测试：骨架能写库', reasoning: 'scripts/smoke.mjs 自动写入', tags: ['冒烟', '骨架', '测试'], project: 'maobing-memory', type: 'event', importance: 2 },
+  {},
+)
+ok(res && res.ok === true && typeof res.id === 'number', 'host: memory_remember 写入成功并返回短号')
+const recent = await registered.get('memory_recent').execute({ limit: 5 }, {})
+ok(recent.count === 1, 'host: memory_recent 读回 1 条')
+ok(String(recent.lines?.[0] ?? '').includes('骨架能写库'), 'host: 读回内容正确')
+
+let rememberErr = ''
+try {
+  await remember.execute({ judgment: '没有标签', project: 'x', tags: [] }, {})
+} catch (e) {
+  rememberErr = String(e?.message ?? e)
+}
+ok(rememberErr.includes('tags'), 'host: 缺 tags 时报错且提示 tags')
+
+// ── 注入（首轮快照 / 每轮命中）───────────────────────────────────────────
+const preStep = handlers.get('agent/pre-step')
+ok(typeof preStep === 'function', 'inject: 注册了 agent/pre-step 钩子')
+
+await remember.execute(
+  { judgment: 'maobing-memory 的构建命令是 npm run build', reasoning: 'README 里写的', tags: ['构建', 'build', '命令'], project: 'maobing-memory', type: 'skill', importance: 3 },
+  {},
+)
+await remember.execute(
+  { judgment: '用户要求插件必须能装能卸', reasoning: '记忆插件选择02.txt', tags: ['安装', '卸载', 'harness'], project: 'maobing-memory', type: 'knowledge', importance: 3 },
+  {},
+)
+
+const userMsg = (text) => ({ id: 'u-' + Math.random().toString(36).slice(2), role: 'user', content: [{ type: 'text', text }], source: { kind: 'user' } })
+const payload = { agent: { session: { header: { id: 'sess-smoke' } } } }
+const decision = (msgs) => ({ kind: 'enter', messages: msgs })
+
+const first = await preStep(payload, async () => decision([userMsg('你好，我们开始干活吧')]))
+const injectedFirst = (first?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory')
+ok(injectedFirst.length === 1, 'inject: 首轮插入了 1 条插件消息')
+ok(String(injectedFirst[0]?.content?.[0]?.text ?? '').includes('长期记忆（maobing-memory）'), 'inject: 首轮内容是记忆快照')
+ok((first?.messages ?? []).length === 2, 'inject: 首轮消息数 = 用户 1 + 插件 1')
+
+const second = await preStep(payload, async () => decision([userMsg('构建命令是什么？')]))
+const injectedSecond = (second?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory')
+ok(injectedSecond.length === 1, 'inject: 第二轮也插入了插件消息')
+const secondText = String(injectedSecond[0]?.content?.[0]?.text ?? '')
+ok(secondText.includes('可能相关的记忆'), 'inject: 第二轮内容是命中块')
+ok(secondText.includes('构建命令'), 'inject: 命中到了构建命令那条')
+
+const third = await preStep(payload, async () => decision([userMsg('构建命令是什么？')]))
+const injectedThird = (third?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory')
+const thirdText = String(injectedThird[0]?.content?.[0]?.text ?? '')
+ok(!thirdText.includes('可能相关的记忆'), 'inject: 同一批命中不重复注入（seen 生效；情绪行仍每轮带）')
+
+const otherSession = await preStep({ agent: { session: { header: { id: 'sess-other' } } } }, async () => decision([userMsg('新会话第一句')]))
+ok((otherSession?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory').length === 1, 'inject: 新会话重新给快照')
+
+// ── 整理（衰减 → 归档，不删）─────────────────────────────────────────────
+const dream = registered.get('memory_dream')
+ok(typeof dream?.execute === 'function', 'dream: 注册了 memory_dream 工具')
+
+const beforeDream = await dream.execute({ dryRun: true }, {})
+ok(beforeDream?.ok === true && String(beforeDream.log?.[0] ?? '').includes('dryRun'), 'dream: dryRun 可统计')
+
+await remember.execute(
+  { judgment: '这条记忆会被衰减到归档', project: 'smoke', tags: ['衰减', '归档'], type: 'knowledge', importance: 1 },
+  {},
+)
+let archivedTotal = 0
+for (let i = 0; i < 20; i++) {
+  const r = await dream.execute({}, {})
+  archivedTotal += Number(r?.archived ?? 0)
+}
+ok(archivedTotal >= 1, 'dream: 强度归零的记忆被归档（≥1 条）')
+
+const afterDream = await dream.execute({ dryRun: true }, {})
+ok(afterDream?.ok === true, 'dream: 整理后 dryRun 仍可用（库没被搞坏）')
+
+// ── 记忆检索 / 读取 / 修改 ──────────────────────────────────────────────
+const memSearch = registered.get('memory_search')
+const memRead = registered.get('memory_read')
+const memUpdate = registered.get('memory_update')
+ok(typeof memSearch?.execute === 'function', 'mem: 注册了 memory_search')
+ok(typeof memRead?.execute === 'function', 'mem: 注册了 memory_read')
+ok(typeof memUpdate?.execute === 'function', 'mem: 注册了 memory_update')
+
+const hit1 = await memSearch.execute({ query: '冒烟测试 骨架能写库' }, {})
+ok(Number(hit1.count) >= 1, 'mem: memory_search 能命中刚写的记忆')
+ok(Number.isFinite(Number(hit1.hits?.[0]?.score)), 'mem: score 是有限数字（不再是 NaN）')
+
+const got = await memRead.execute({ id: 1 }, {})
+ok(got?.found === true && String(got.judgment).includes('骨架能写库'), 'mem: memory_read 读回正确内容')
+
+const upd = await memUpdate.execute({ id: 1, importance: 4, tags: ['改过', '冒烟'] }, {})
+ok(upd?.ok === true && (upd.changed ?? []).includes('importance'), 'mem: memory_update 改字段成功')
+const after = await memRead.execute({ id: 1 }, {})
+ok(after.importance === 4 && after.tags.includes('改过'), 'mem: 改动落库正确')
+
+const arch = await memUpdate.execute({ id: 1, status: 'archived' }, {})
+ok(arch?.ok === true, 'mem: 能通过 memory_update 归档')
+const back = await memUpdate.execute({ id: 1, status: 'active' }, {})
+ok(back?.ok === true, 'mem: 能通过 memory_update 恢复')
+
+const missing = await memRead.execute({ id: 999999 }, {})
+ok(missing?.found === false, 'mem: memory_read 未找到时返回 found=false')
+
+// ── 项目全景 / 查重 ─────────────────────────────────────────────────────
+const memProject = registered.get('memory_project')
+const memSimilar = registered.get('memory_find_similar')
+ok(typeof memProject?.execute === 'function', 'mem: 注册了 memory_project')
+ok(typeof memSimilar?.execute === 'function', 'mem: 注册了 memory_find_similar')
+
+const proj = await memProject.execute({ project: 'maobing-memory' }, {})
+ok(Number(proj.count) >= 2, 'mem: memory_project 能取回该项目的记忆')
+ok(Array.isArray(proj.groups) && proj.groups.length > 0, 'mem: 返回按类型分组')
+
+const emptyProj = await memProject.execute({ project: '不存在的项目XYZ' }, {})
+ok(Number(emptyProj.count) === 0, 'mem: 不存在的项目返回 0 条')
+
+const sim = await memSimilar.execute({ id: 1, k: 3 }, {})
+ok(sim?.found === true && Array.isArray(sim.similar), 'mem: memory_find_similar 返回相似列表')
+ok(!(sim.similar ?? []).some((x) => x.id === 1), 'mem: 相似结果不含自己')
+
+const simMissing = await memSimilar.execute({ id: 999999 }, {})
+ok(simMissing?.found === false, 'mem: 查重时 id 不存在返回 found=false')
+
+const projNoArg = async () => {
+  try { await memProject.execute({}, {}); return '' } catch (e) { return String(e?.message ?? e) }
+}
+ok((await projNoArg()).includes('project'), 'mem: memory_project 空参数会报错')
+
+// ── render 契约：每个工具的 render 必须返回 ContentBlock[]（不是字符串）──
+for (const [name, def] of registered) {
+  if (typeof def.output?.render !== 'function') continue
+  let sample
+  try {
+    if (name === 'memory_project') sample = await def.execute({ project: 'maobing-memory' }, {})
+    else if (name === 'memory_find_similar') sample = await def.execute({ id: 1 }, {})
+    else if (name === 'memory_read') sample = await def.execute({ id: 1 }, {})
+    else if (name === 'memory_search') sample = await def.execute({ query: '冒烟' }, {})
+    else if (name === 'memory_note_read') sample = await def.execute({ id: 1 }, {})
+    else if (name === 'memory_note_search') sample = await def.execute({ query: '冒烟' }, {})
+    else continue
+  } catch {
+    continue
+  }
+  let rendered
+  try {
+    rendered = def.output.render({}, sample)
+  } catch (e) {
+    ok(false, `render: ${name} 渲染抛错 → ${e?.message ?? e}`)
+    continue
+  }
+  const isBlocks = Array.isArray(rendered) && rendered.every((b) => b && typeof b.type === 'string')
+  ok(isBlocks, `render: ${name} 返回 ContentBlock[]（不是字符串）`)
+  // 直接复刻宿主的那行：dsh-tools/lib/index.js 里 `result.content.some(block => block.type === 'image')`
+  let hostSafe = false
+  try {
+    hostSafe = !rendered.some((block) => block.type === 'image')
+  } catch {
+    hostSafe = false
+  }
+  ok(hostSafe, `render: ${name} 的结果能安全调用 content.some()（宿主 PTC 路径）`)
+}
+
+// ── 文件日志 ────────────────────────────────────────────────────────────
+const logDir = join(process.env.DSH_HOME, 'logs')
+const lg = host.createLogger(logDir, { maxBytes: 4096 })
+lg.info('测试 info 行')
+lg.warn('测试 warn 行')
+lg.error('测试 error 行', new Error('模拟错误'))
+const logText = readFileSync(lg.path, 'utf8')
+ok(logText.includes('[INFO] 测试 info 行'), 'log: info 落盘')
+ok(logText.includes('[WARN] 测试 warn 行'), 'log: warn 落盘')
+ok(logText.includes('[ERROR] 测试 error 行') && logText.includes('模拟错误'), 'log: error 带异常信息落盘')
+ok(lg.path.endsWith('maobing-memory.log'), 'log: 文件名固定为 maobing-memory.log')
+
+// 滚动：超过上限后应当生成 .1 备份
+for (let i = 0; i < 80; i++) lg.info('填充行 ' + i + ' ' + 'x'.repeat(80))
+ok(existsSync(lg.path + '.1'), 'log: 超过 maxBytes 会滚动出 .1 备份')
+
+// ── 合并候选 ────────────────────────────────────────────────────────────
+await remember.execute(
+  { judgment: '冒烟测试：我偏好甜食，可以接受蛋糕和马卡龙，但拒绝高油脂食物', reasoning: 'a', tags: ['甜食', '偏好', '冒烟'], project: 'merge-test', importance: 2 },
+  {},
+)
+await remember.execute(
+  { judgment: '冒烟测试：我偏好甜食，接受蛋糕和马卡龙一类甜点，但拒绝高油脂食物', reasoning: 'b', tags: ['甜食', '口味'], project: 'merge-test', importance: 2 },
+  {},
+)
+await remember.execute(
+  { judgment: '冒烟测试：玩家A#5001 使用「@群Bot 挨骂就哭」作为唤词', reasoning: 'c', tags: ['唤词'], project: 'merge-test', importance: 2 },
+  {},
+)
+await remember.execute(
+  { judgment: '冒烟测试：玩家B#5002 使用「@群Bot 挨骂就哭」作为唤词', reasoning: 'd', tags: ['唤词'], project: 'merge-test', importance: 2 },
+  {},
+)
+
+const { DatabaseSync: TestDb } = await import('node:sqlite')
+const testDbPath = join(process.env.DSH_HOME, 'storages', 'maobing-memory', 'memory.db')
+const testDb = new TestDb(testDbPath)
+
+const cands = host.findMergeCandidates(testDb, { threshold: 0.5, project: 'merge-test' })
+ok(Array.isArray(cands), 'merge: 能取回候选列表')
+const sweetPair = cands.find((c) => c.a.judgment.includes('蛋糕和马卡龙') && c.b.judgment.includes('蛋糕和马卡龙'))
+ok(Boolean(sweetPair), 'merge: 识别出甜食那对重复')
+const wrongPair = cands.find((c) => c.a.judgment.includes('玩家A') && c.b.judgment.includes('玩家B'))
+ok(wrongPair === undefined, 'merge: 不同 ID 的两条不会被误判为重复（实体过滤）')
+
+if (sweetPair) {
+  const keepId = sweetPair.a.id
+  const dropId = sweetPair.b.id
+  const merged = host.mergeMemories(testDb, keepId, dropId)
+  ok(merged.ok === true && merged.mergedId === dropId, 'merge: 合并返回成功')
+  const kept = await memRead.execute({ id: keepId }, {})
+  ok(kept.found === true && kept.tags.includes('甜食'), 'merge: 保留条仍在且标签合并')
+  const dropped = await memRead.execute({ id: dropId }, {})
+  ok(dropped.status === 'archived', 'merge: 被合并那条已归档')
+}
+testDb.close()
+
+// ── 情绪四轴（纯算法；工具已改为内部触发，不再暴露给模型）──────────────
+const baseMood = { ...host.DEFAULT_MOOD, updated_at: 1 }
+const mm1 = host.approach(baseMood, { joy: 0.9 })
+ok(Math.abs(mm1.joy - 0.64) < 0.02, `mood: 弹性逼近正确（joy=${mm1.joy.toFixed(3)}，期望≈0.64）`)
+
+const mm2 = host.approach(mm1, { joy: 0.9 })
+ok(mm2.joy > mm1.joy && mm2.joy < 0.9, 'mood: 越靠近目标变化越小（弹性生效）')
+ok(mm2.joy - mm1.joy < 0.1, 'mood: 单次步进受限')
+ok(mm2.anger === 0.5 && mm2.surprise === 0.5 && mm2.disgust === 0.5, 'mood: 未传的轴保持不变')
+
+const mm3 = host.regress({ ...baseMood, joy: 1 })
+ok(Math.abs(mm3.joy - 0.975) < 0.01, 'mood: 回中一步为 -5%')
+ok(host.formatMoodLine(mm1).startsWith('【情绪】喜'), 'mood: formatMoodLine 格式正确')
+ok(host.approach(baseMood, { anger: 99 }).anger <= 1, 'mood: 超过 1 会被夹到 1')
+ok(registered.get('memory_mood') === undefined, 'mood: 手动拨情绪的工具已移除（情绪只由对话触发）')
+
+// ── 反思轮（记忆 + 情绪一次调用，三层防循环）──────────────────────────────
+const turnStopping = handlers.get('agent/turn-stopping')
+const sessionEvent = handlers.get('session/event')
+ok(typeof turnStopping === 'function', 'reflect: 注册了 agent/turn-stopping')
+ok(typeof sessionEvent === 'function', 'reflect: 注册了 session/event')
+
+const followups = []
+const mkAgent = (sid) => ({
+  session: {
+    header: { id: sid, origin: 'main' },
+    events: () => [
+      { type: 'user/message', data: { content: [{ type: 'text', text: '早上好呀' }] } },
+      { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '早' }] } } },
+    ],
+  },
+  followup: (m) => followups.push(m),
+})
+
+turnStopping({ agent: mkAgent('sess-reflect'), turn: 1 })
+ok(followups.length === 1, 'reflect: 第一轮排了一次反思')
+turnStopping({ agent: mkAgent('sess-reflect'), turn: 2 })
+ok(followups.length === 1, 'reflect: 冷却期内不重复排（防循环）')
+
+// 反思轮自己的结束（最近用户消息含标记）不触发
+const agentSelf = mkAgent('sess-self')
+agentSelf.session.events = () => [
+  { type: 'user/message', data: { content: [{ type: 'text', text: '[maobing-memory-reflect] 回顾刚才这一轮' }] } },
+]
+turnStopping({ agent: agentSelf, turn: 3 })
+ok(followups.length === 1, 'reflect: 反思轮自己不再套娃')
+
+// 解析反思结果 → 写记忆
+const reflectJson = JSON.stringify({
+  memories: [
+    {
+      type: 'knowledge',
+      judgment: '反思轮测试写入的一条记忆',
+      reasoning: '冒烟测试',
+      tags: ['测试', '反思', '冒烟'],
+      project: 'maobing-memory',
+      importance: 2,
+    },
+  ],
+  soul_state: { joy: 0.8, anger: 0.2, surprise: 0.6, disgust: 0.9 },
+})
+sessionEvent(
+  { header: { id: 'sess-reflect' } },
+  { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '```json\n' + reflectJson + '\n```' }] } } },
+)
+const reflectFound = await memSearch.execute({ query: '反思轮测试写入' }, {})
+ok(Number(reflectFound.count) >= 1, 'reflect: 反思结果里的记忆被写入库')
+
+// SOUL 行（meow 风格的反思输出：记忆用工具写，情绪单独一行）
+sessionEvent(
+  { header: { id: 'sess-soul' } },
+  {
+    type: 'assistant/message',
+    data: { message: { content: [{ type: 'text', text: '记忆已处理完。\nSOUL joy=0.70 anger=0.20 surprise=0.50 disgust=0.90' }] } },
+  },
+)
+ok(true, 'reflect: SOUL 行能被解析（不抛异常）')
+
+// 非 JSON 的普通回复不应误判
+sessionEvent(
+  { header: { id: 'sess-reflect' } },
+  { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '这是一句普通回复，没有 soul_state 那些字。' }] } } },
+)
+ok(true, 'reflect: 普通回复不触发解析（无异常）')
+
+// ── 笔记 ────────────────────────────────────────────────────────────────
+const noteWrite = registered.get('memory_note_write')
+const noteRead = registered.get('memory_note_read')
+const noteSearch = registered.get('memory_note_search')
+ok(typeof noteWrite?.execute === 'function', 'notes: 注册了 memory_note_write')
+ok(typeof noteRead?.execute === 'function', 'notes: 注册了 memory_note_read')
+ok(typeof noteSearch?.execute === 'function', 'notes: 注册了 memory_note_search')
+
+const w = await noteWrite.execute(
+  {
+    title: '冒烟测试笔记',
+    body: '# 冒烟测试笔记\n\n这是脚本写进去的正文。\n\n## 小节\n- 第一行\n- 第二行\n',
+    tags: ['冒烟', '笔记'],
+  },
+  {},
+)
+ok(w?.ok === true && typeof w.id === 'number', 'notes: 写入成功并返回 id')
+ok(Number(w.chars) > 20, 'notes: 统计了字数')
+
+const r1 = await noteRead.execute({ id: w.id }, {})
+ok(r1?.found === true && String(r1.text).includes('冒烟测试笔记'), 'notes: 能按 id 读回正文')
+ok(Number(r1.totalLines) >= 6, 'notes: 返回总行数')
+
+const r2 = await noteRead.execute({ id: w.id, offset: 3, limit: 2 }, {})
+ok(String(r2.text).split('\n').length === 2 && r2.offset === 3, 'notes: 按行分页正确')
+
+const s1 = await noteSearch.execute({ query: '冒烟测试笔记' }, {})
+ok(Number(s1.count) >= 1, 'notes: 检索能命中刚写的笔记')
+
+const bad = async () => {
+  try {
+    await noteWrite.execute({ title: '', body: 'x' }, {})
+    return ''
+  } catch (e) {
+    return String(e?.message ?? e)
+  }
+}
+ok((await bad()).includes('title'), 'notes: 空标题会报错')
+
+// ── 笔记修改 ────────────────────────────────────────────────────────────
+const noteUpdate = registered.get('memory_note_update')
+ok(typeof noteUpdate?.execute === 'function', 'notes: 注册了 memory_note_update')
+
+const w2 = await noteWrite.execute({ title: '待改的笔记', body: '原始正文一行\n第二行\n', tags: ['原始'] }, {})
+const u1 = await noteUpdate.execute({ id: w2.id, title: '改过的笔记' }, {})
+ok(u1?.ok === true && u1.title === '改过的笔记', 'notes: 改标题成功')
+ok(u1.chars === w2.chars, 'notes: 只改标题时字数不变')
+
+const u2 = await noteUpdate.execute({ id: w2.id, body: '# 新标题\n\n换了一份正文，长一点，用来验重算字数。\n', tags: ['新标签', '改过'] }, {})
+ok(u2?.ok === true && u2.chars !== w2.chars, 'notes: 改正文后字数重算')
+const rBody = await noteRead.execute({ id: w2.id }, {})
+ok(String(rBody.text).includes('换了一份正文'), 'notes: 文件内容真的换了')
+
+const u3 = await noteUpdate.execute({ id: 999999, body: 'x' }, {})
+ok(u3?.ok === false, 'notes: 改不存在的笔记返回 ok=false')
+
+const u4 = async () => {
+  try { await noteUpdate.execute({ id: w2.id }, {}); return '' } catch (e) { return String(e?.message ?? e) }
+}
+ok((await u4()).includes('没有要改的字段'), 'notes: 不给字段会报错')
+
+const u5 = await noteUpdate.execute({ id: w2.id, append: '## 追加的一节\n\n这段是后补的。' }, {})
+ok(u5?.ok === true && u5.chars > u2.chars, 'notes: append 追加后字数增加')
+const rAppend = await noteRead.execute({ id: w2.id }, {})
+ok(String(rAppend.text).includes('这段是后补的'), 'notes: append 的内容真的写进文件')
+
+const u6 = await noteUpdate.execute({ id: w2.id, replace: { old: '后补的', new: '替换过的' } }, {})
+ok(u6?.ok === true, 'notes: replace 替换成功')
+const rRep = await noteRead.execute({ id: w2.id }, {})
+ok(String(rRep.text).includes('替换过的') && !String(rRep.text).includes('后补的'), 'notes: replace 的内容真的换了')
+
+const u7 = async () => {
+  try {
+    await noteUpdate.execute({ id: w2.id, replace: { old: '这段文字根本不存在', new: 'x' } }, {})
+    return ''
+  } catch (e) {
+    return String(e?.message ?? e)
+  }
+}
+ok((await u7()).includes('找不到'), 'notes: replace 找不到原文时报错')
+
+// ── client ──────────────────────────────────────────────────────────────
+const code = readFileSync(join(root === '/' ? '' : root, 'lib', 'client.js'), 'utf8')
+let loaded = null
+const fakeReact = {
+  createElement: (type, props, ...children) => ({ type, props, children }),
+  useState: (init) => [init, () => {}],
+  useEffect: () => {},
+}
+const sandbox = {
+  window: { __ModuleLoader__: { load: (o) => { loaded = o } } },
+  require: (m) => (m === 'react' ? fakeReact : (() => { throw new Error('unexpected require ' + m) })()),
+  console,
+  fetch: () => Promise.reject(new Error('no host route yet')),
+  document: { querySelectorAll: () => [], head: { appendChild: () => {} }, createElement: () => ({ dataset: {}, style: {}, setAttribute: () => {} }) },
+  setTimeout,
+  clearTimeout,
+}
+vm.runInNewContext(code, sandbox, { filename: 'client.js' })
+ok(loaded !== null, 'client: 调用了 __ModuleLoader__.load')
+ok(loaded?.id === 'dsh-maobing-memory', 'client: 模块 id 正确')
+const clientExports = loaded.factory(sandbox.require)
+ok(typeof clientExports.apply === 'function', 'client: 导出 apply')
+
+const slots = []
+const fakeSlots = {
+  register: (opts, comp) => { slots.push({ ...opts, comp }); return () => {} },
+  inject: (key, cb) => { const d = cb(); return () => { try { d?.() } catch {} } },
+}
+const dispose = clientExports.apply({ slots: fakeSlots })
+ok(slots.some((s) => s.name === 'sidebar.panellist' && s.id === 'dsh-maobing-memory'), 'client: 注册了 sidebar.panellist')
+ok(slots.some((s) => s.name === 'main' && s.key === 'dsh-maobing-memory'), 'client: 注册了 main(key=maobing-memory)')
+ok(typeof dispose === 'function', 'client: apply 返回卸载函数')
+
+console.log(`\n${failed === 0 ? 'ALL PASS' : failed + ' FAILED'}`)
+process.exit(failed === 0 ? 0 : 1)

@@ -1,0 +1,51 @@
+{
+  "name": "dsh-maobing-memory",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Cross-session memory for DeepSeek Harness: judgment-style memory entries with tags, strength decay, project grouping, BM25 recall and a browsable panel.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "NOTICE.md",
+    "LICENSE",
+    "TODO.md"
+  ],
+  "license": "GPL-3.0-only",
+  "author": "小毛病",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/131441957/feiyu-dsh-workspace.git",
+    "directory": "maobing-memory"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "pack": "node scripts/pack.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "typescript": "^5.6.0"
+  }
+}

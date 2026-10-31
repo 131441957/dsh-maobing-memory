@@ -1,0 +1,18 @@
+# 依赖
+node_modules/
+
+# 构建与打包产物（Release 里单独上传 tgz）
+dist/
+*.tgz
+
+# 编辑器/系统
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+*.log
+
+# 本地临时
+.tmp-*
+# 构建产物（源码在 src/，Release 的 tgz 里带 lib/）
+lib/
