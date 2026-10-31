@@ -152,6 +152,12 @@ const TYPE_TONE: Record<string, string> = {
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────────────────
+//
+// 【将来拆到 client-api.ts 的缝（client 端唯一值得先抽的一块）】
+//  这里 + 上面的「类型」段 + 时间/标签/颜色格式化（约 120 行）是**纯函数 + 一种 HTTP 封装**，
+//  不持有任何 React 状态，抽出去零风险：`import { getJson, parseTags, relTime, type Row } from './client-api'`。
+//  抽完以后主面板里只剩「取数 → 渲染」，也顺便把「BASE 由 ROUTE_PREFIX 拼、不是 PLUGIN_ID」
+//  这条契约收在一个文件里（2026-10-31 面板 404 就是因为这条约定散在 client.ts 深处）。
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(BASE + path, { headers: { accept: 'application/json' } })
   if (!res.ok) throw new Error(`${path} → HTTP ${res.status}`)
@@ -640,6 +646,14 @@ function Detail({
 }
 
 // ── 主面板 ──────────────────────────────────────────────────────────────────
+//
+// 【不建议拆的一块】约 940 行、31 个 useState、3 个 useEffect，且状态是**横向交织**的：
+//  列表的筛选/分页、抽屉的打开行、笔记的阅读偏移、检索的关键词、整理的日志刷新都挂在同一个
+//  组件上，彼此通过 tab 切换互相影响（例如切 tab 要清掉抽屉、保存后要重拉列表）。
+//  真要拆，正确顺序不是"按行号切"，而是**按 tab 切**：先给每个 tab 建独立的取数 hook
+//  （useListData / useNotesData / useSearchData / useDreamData / useOverview），把共享的
+//  `tab`、`error`、`refresh` 三个状态留在外壳，最后才把渲染拆成 5 个组件。
+//  在那之前别动——拆 React 组件引入的 hook 依赖 bug，比文件长本身贵得多。
 type TabKey = 'overview' | 'list' | 'notes' | 'search' | 'dream'
 
 /**

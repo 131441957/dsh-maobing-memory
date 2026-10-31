@@ -129,6 +129,13 @@ function uid(now = Date.now()): string {
   return `${t}-${Math.random().toString(36).slice(2, 10)}`
 }
 
+// ── 写入 / 读取 ────────────────────────────────────────────────────────────
+//
+// 下面这一段的共同约定（改之前先看，别破坏）：
+//  - **uid 是幂等键**：同一条记忆重复写入靠 uid 去重，别改成自增 id；
+//  - tags / importance / strength 在这里夹取，调用方不必自己校验；
+//  - 所有查询都显式列出字段（不用 `SELECT *`），因为 `MemoryRow` 是 host 与 client 共用的形状。
+//  - 没有任何 UPDATE/DELETE 会真的删行：下线只有 `status='archived'` 一条路（schema 里的 CHECK 也拦着）。
 export function insertMemory(
   db: DatabaseSync,
   input: {
@@ -284,7 +291,11 @@ export function listActive(db: DatabaseSync, limit = 800): MemoryRow[] {
     .all(limit) as unknown as MemoryRow[]
 }
 
-/** 命中回写：刷新 last_recalled_at 并小幅加 useful_score。 */
+/** 命中回写：刷新 last_recalled_at 并小幅加 useful_score。
+ *
+ *  为什么单独一个函数而不是让调用方自己 UPDATE：召回反馈有**三个调用点**（注入 / 检索工具 /
+ *  面板「标记」），三处必须用同一套语义（时间戳 + 小幅加分，不能一步把分数拉满），否则排序会被
+ *  某一条路径带偏。将来若要做「被动共鸣」（TODO 的 P1），也从这个函数拿数据。 */
 export function markRecalled(db: DatabaseSync, ids: number[], usefulDelta = 0): void {
   if (ids.length === 0) return
   const now = Date.now()

@@ -217,6 +217,12 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   // ② 检索要走 BM25 + 标签 + 强度加权，模型手搓 SQL 得不到一样的排序；
   // ③ 每个工具的输出都必须过 `output.render` 返回 ContentBlock[]（宿主 PTC 路径会对
   //    result.content 调 .some()，返回字符串会直接抛 "content.some is not a function"）。
+  //
+  // 【将来拆到 tools.ts 的缝】这一组（含下面笔记 4 个、记忆读写 5 个）只依赖 `db / cfg / log`
+  // 与 `notesDir(path)`，**不碰任何 session 状态**，是最干净的一刀：
+  //   export function registerTools(ctx, deps: { db, cfg, log, notesDir }): Array<() => void>
+  // 注意两点：a) 每个 register 都返回 dispose，现在靠文件末尾统一调用，拆了要把返回数组传回去；
+  //           b) 工具描述是模型可见文案，搬的时候别顺手改写（有冒烟断言盯着 set 里的名字）。
 
   // ── 工具 1：写入一条记忆 ────────────────────────────────────────────────
   const disposeRemember = ctx.tools.register({
@@ -322,6 +328,15 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 
   // ── 面板数据路由（只读，前缀 /maobing-memory）──────────────────────────
+  //
+  // 【将来拆到 routes.ts 的缝 —— 这是**最该先拆**的一段】
+  //  - 依赖只有 `db / cfg / log / path`，不碰 session、不碰注入状态，纯函数边界；
+  //  - 建议签名：`export function installRoutes(webServer, deps): () => void`（现在的
+  //    routeDisposers 数组就是那个返回值）；
+  //  - ⚠️ 路径字符串 `/maobing-memory/xxx` 是前端契约：client.ts 的 ROUTE_PREFIX、冒烟里的
+  //    「client 前缀 == host 路由」对账都盯着它——搬走时一个字符都别改；
+  //  - ⚠️ 这里**不校验 HTTP 方法**，且有副作用的路由（update / mark / merge / note-delete /
+  //    dream?go=1）也走 GET，原因和代价见文件头注释；搬走时保持原样，别顺手改语义。
   const routeDisposers: Array<() => void> = []
   const installRoutes = (webServer: any): void => {
     try {
@@ -550,6 +565,13 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   }
 
   // ── 注入：首轮快照 + 每轮 BM25 命中 ────────────────────────────────────
+  //
+  // 【将来拆到 inject-hook.ts 的缝，但要和「反思轮」那段**一起**拆】
+  //  - 这里持有 session 级状态：firstTurned（首轮只给快照）、injectedBySession（seen 去重）；
+  //  - 反思轮那边持有 reflectTurns / reflectCountedTurn / reflectQueuedTurn / reflectCooldown；
+  //  - 两段都以 sid 为 key，拆一半会变成「两份 session 状态各自漂移」，所以要么一起搬，
+  //    要么干脆不拆（现在的选择）。
+  //  - 注入失败一律放行原始消息（记忆层坏掉不能拖垮对话）——这条策略别在搬家时丢掉。
   const firstTurned = new Set<string>()
   const injectedBySession = new Map<string, Set<number>>()
 
@@ -652,6 +674,10 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 
   // ── 笔记工具（长文，正文落 Markdown 文件）──────────────────────────────
+  //
+  // 【将来拆到 tools.ts 的缝（同一批）】只依赖 `db / log / notesDir(path)`。
+  // 拆的时候注意：笔记正文在磁盘上、索引在库里，启动时的 `syncNotesFromDisk` 是**唯一**把
+  // 文件重新纳入库的入口（用户手放 md 进目录就靠它），搬家时别把它留在 index.ts 里忘了执行。
   const dir = notesDir(path)
   try {
     const synced = syncNotesFromDisk(db, dir)
@@ -809,6 +835,10 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 
   // ── 记忆读取/修改工具（补齐「能写不能查」的缺口）──────────────────────
+  //
+  // 【将来拆到 tools.ts 的缝（同一批）】只依赖 `db / log`，是四组工具里最干净的一组。
+  // 这组的共同约定：read/search/project 只读；update 既能改字段也能改 status（归档/恢复），
+  // **没有物理删除**——归档是唯一的下线方式，别在搬家时"顺手"加个 delete。
   const MEMORY_TYPES_LIST = ['knowledge', 'event', 'skill', 'task', 'emotion']
 
   const disposeNoteUpdate = ctx.tools.register({
@@ -1200,6 +1230,13 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 
   // ── 反思轮：每 N 轮结束回顾一次（写记忆 + 情绪自评，一次调用两件事）──────────
+  //
+  // 【将来拆到 reflect.ts 的缝，但**必须和上面的「注入」一起拆**】
+  //  - 这一段持有 4 个 session 级 Map（queuedTurn / cooldown / turns / countedTurn），
+  //    注入那边持有 firstTurned / injectedBySession，都以 sid 为 key、都在 turn 边界上读写；
+  //  - 只拆一半 = 两份 session 状态各自漂移（当初无限套娃就是这么来的），所以要么一起搬，
+  //    要么就留在 index.ts（当前选择）；
+  //  - 拆出去后这里只剩一行 `ctx.on('agent/turn-stopping', ...)` 挂载 + 一行 dispose。
   const REFLECT_MARKER = '[maobing-memory-reflect]'
   // ── 反思轮：攒够 N 轮（reflectEveryN）才让模型回顾一次 ────────────────────
   //
@@ -1427,6 +1464,10 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 
   // ── 每日整理（默认 22:00，衰减 → 归档，不删）────────────────────────────
+  //
+  // 【可拆性】这个工具只有十几行、调度器本身在 dream.ts，拆不拆都无所谓；
+  // 真要拆就跟上面的工具区一起搬进 tools.ts（同源依赖：db / log / dream）。
+  // 注意 `dryRun`（空跑）必须不写库也不写 meta.lastDreamDay，否则当晚的定时整理会被跳过。
   const disposeDreamTool = ctx.tools.register({
     name: 'memory_dream',
     description:
