@@ -26,11 +26,20 @@ if (Test-Path $target) {
   Write-Host "[1/2] 链接不存在，跳过"
 }
 
+# 收掉 install.ps1 自己建的空 node_modules（只在**确认为空**时删，不碰别人的东西）
+$nm = Join-Path $profileDir 'node_modules'
+if (Test-Path $nm) {
+  $left = @(Get-ChildItem $nm -Force)
+  if ($left.Count -eq 0) { Remove-Item $nm -Force; Write-Host "[1/2] 顺手收掉空目录：$nm" }
+}
+
 if (Test-Path $patchFile) {
   $raw = Get-Content $patchFile -Raw -Encoding utf8
   if ($raw -match 'maobing-memory') {
-    # 整块匹配：注释行 + insert 三行
-    $pattern = '(?s)(\r?\n)?# maobing-memory（由 scripts\\install\.ps1 写入；卸载用 uninstall\.ps1）\r?\n- insert:\r?\n\s+- id: dsh-maobing-memory\r?\n\s+name: ''maobing-memory''\r?\n?'
+    # 整块匹配：注释行 + insert 三行。
+    # 名字用「可选的 dsh- 前缀」兼容两种写法：2026-10-31 插件改名时这里漏改（正则还是旧名），
+    # 结果卸载报「自动摘除失败」并残留 patch 块 —— 冒烟里已加断言，改名漏改会变红。
+    $pattern = '(?s)(\r?\n)?# maobing-memory（由 scripts\\install\.ps1 写入；卸载用 uninstall\.ps1）\r?\n- insert:\r?\n\s+- id: (?:dsh-)?maobing-memory\r?\n\s+name: ''(?:dsh-)?maobing-memory''\r?\n?'
     $stripped = [regex]::Replace($raw, $pattern, '')
     if ($stripped -match 'maobing-memory') { throw "自动摘除失败，请手工编辑 $patchFile" }
     $leftover = (($stripped -split "`r?`n") | Where-Object { $_.Trim() -ne '' -and -not $_.Trim().StartsWith('#') }) -join "`n"

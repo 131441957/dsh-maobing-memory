@@ -215,7 +215,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 npm install            # 装 esbuild / typescript
 npm run build          # 构建 → lib/
 npm run pack           # 打包 → dist/maobing-memory-<版本>.tgz
-node scripts/smoke.mjs # 冒烟测试（150 项，不启动 DSH）
+node scripts/smoke.mjs # 冒烟测试（156 项，不启动 DSH）
 
 # 从 meow-memory 迁移历史记忆（可选；必须给 --src，加 --go 才真写库）
 node scripts/migrate-from-meow.mjs --src "<meow 的 memory.db 路径>"
@@ -244,9 +244,9 @@ scripts/        smoke.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-fro
 
 改完代码、发版之前，按顺序做完这 5 步。**冒烟全过 ≠ 真机能跑**，第 3~5 步必须做：
 
-1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **150 项全过**（`FAIL` 一条都不许有，退出码 0）
+1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **156 项全过**（`FAIL` 一条都不许有，退出码 0）
    - 新增或改过的断言必须过**变异测试**：故意把对应逻辑改坏，确认这条断言真的会变红（否则它只是个印着 `ok` 的摆设）
-2. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链）
+2. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链、install 自己建的空 `node_modules` 也要被收掉）
 3. **重启后看日志三行**（`<DSH_HOME>/storages/maobing-memory/maobing-memory.log`）：
    - `启动：版本 …`
    - `就绪：工具 12 个，记忆 N（活跃 X / 归档 Y），注入=on(总分≥6)，反思=on(每3轮)，整理 22:00`

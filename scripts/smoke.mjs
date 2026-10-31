@@ -111,6 +111,23 @@ ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具�
   ok(!/BASE = `\/\$\{PLUGIN_ID\}`/.test(clientSrc), 'client: BASE 不再由 PLUGIN_ID 拼出来（改名就会 404）')
 }
 
+// 安装/卸载脚本的成对一致性 + 编码
+// （2026-10-31 踩过：改名后 uninstall.ps1 的摘除正则还是旧名，卸载报「自动摘除失败」并残留 patch 块）
+{
+  const ins = readFileSync(join(root, 'scripts', 'install.ps1'), 'utf8')
+  const uns = readFileSync(join(root, 'scripts', 'uninstall.ps1'), 'utf8')
+  for (const [f, text] of [['install.ps1', ins], ['uninstall.ps1', uns]]) {
+    const buf = readFileSync(join(root, 'scripts', f))
+    ok(buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf, `${f}: UTF-8 带 BOM（PowerShell 5.1 按 GBK 读中文会语法报错）`)
+    // 只断言「不混」：仓库里存 LF（core.autocrlf 负责签出成 CRLF），clone 配置不同也不该误报
+    ok(!/\r\n/.test(text) || !/[^\r]\n/.test(text), `${f}: 行尾一致（不混 CRLF / LF）`)
+  }
+  const declared = /name: '([^']+)'/.exec(ins)?.[1] ?? ''
+  const base = declared.replace(/^dsh-/, '')
+  ok(declared.length > 0, `卸载: install.ps1 里登记的名字可读（${declared}）`)
+  ok(base.length > 0 && uns.includes(base), '卸载: uninstall.ps1 的摘除正则认得出 install.ps1 写的名字（改名漏改 = 卸载残留）')
+}
+
 
 const remember = registered.get('memory_remember')
 const res = await remember.execute(
