@@ -17,8 +17,7 @@
     "cordis.patch.yml",
     "README.md",
     "NOTICE.md",
-    "LICENSE",
-    "TODO.md"
+    "LICENSE"
   ],
   "license": "GPL-3.0-only",
   "author": "小毛病",
