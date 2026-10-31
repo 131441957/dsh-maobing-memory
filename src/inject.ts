@@ -100,28 +100,51 @@ export function buildSnapshot(rows: MemoryLike[], opts: { perProject?: number; m
 }
 
 /**
+ * 小库补偿后的**实际阈值**。
+ *
+ * 为什么不能直接写死 6：BM25 的 idf 随库容量缩水。实测（2026-10-31，真库 566 条）：
+ * 「命中一个只出现 1 次的稀有词」≈ 5.9 分；同样的命中在 3 条库里只有 ≈ 1 分。
+ * 固定 6 分阈值会让刚装上的小库**一条都注入不出来**（冒烟库只有 3 条时，正确答案
+ * 算下来 5.7 分，差一点就被砍掉）。所以按库容量线性放宽，≥200 条时用原阈值。
+ */
+export function effectiveMinScore(minScore: number, docCount: number): number {
+  if (!(minScore > 0)) return 0
+  const scale = Math.min(1, Math.max(0, docCount) / 200)
+  return minScore * scale
+}
+
+/**
  * 每轮命中：**混合注入**。
  *
  * 前 k 条给全文（最可能是答案的），其余最多 indexLimit 条只给一行索引。
  * 这么改的原因（2026-10-31 实测）：只注入 topK 条时，正确答案排第 4 就等于不存在
  * （问「meow 的库现在叫什么」，#1074 排第 4 被丢掉，模型转头去查 GitHub）。
  * 给索引能让模型知道「库里还有这些」，需要细节再 memory_read——覆盖从 3 条提到 25 条。
+ *
+ * `minScore`（总分门槛，默认 6）再砍一刀：总分 =（BM25 + 标签）× 重要 × 强度 × 新鲜度，
+ * 低于门槛的**全文和索引都不给**。原因是语料多了以后，每轮 top11 里常有三五条只是
+ * 撞上「记忆」「插件」这种通用词（实测把群友闲聊也捞出来），每轮白烧 300~500 token。
  */
 export function buildHits(
   rows: MemoryLike[],
   query: string,
-  opts: { k?: number; indexLimit?: number; seen?: Set<number>; now?: number } = {},
+  opts: { k?: number; indexLimit?: number; seen?: Set<number>; now?: number; minScore?: number } = {},
 ): { text: string; ids: number[] } | null {
   const k = Math.max(1, opts.k ?? 5)
   const indexLimit = Math.max(0, opts.indexLimit ?? 8)
   const docs = toDocs(rows).filter((d) => !opts.seen?.has(d.id))
   if (docs.length === 0 || query.trim().length === 0) return null
-  const hits: Hit[] = search(query, docs, { k: k + indexLimit, now: opts.now })
+  // 先全量打分再按门槛过滤：若直接取 k+indexLimit 条再滤，被砍掉的位置不会回填，
+  // 结果就是「阈值一把注入宽度也砍没了」。
+  const minScore = effectiveMinScore(opts.minScore ?? 0, docs.length)
+  const hits: Hit[] = search(query, docs, { k: Math.max(1, docs.length), now: opts.now }).filter(
+    (h) => h.score >= minScore,
+  )
   if (hits.length === 0) return null
   const byId = new Map(rows.map((r) => [r.id, r]))
 
   const head = hits.slice(0, k)
-  const tail = hits.slice(k)
+  const tail = hits.slice(k, k + indexLimit)
 
   const parts = [HIT_MARKER]
   for (const h of head) {
@@ -149,5 +172,7 @@ export function buildHits(
   parts.push('')
   parts.push('（上面只是线索。若这些都不足以回答，用 memory_search 自己再搜一次，别凭印象编。）')
 
-  return { text: parts.join('\n'), ids: hits.map((h) => h.id) }
+  // ids 只报**真正注入过的**那些：调用方拿它去 markRecalled / 记 seen。
+  // 门槛以上但排在 k+indexLimit 之外的条目没花 token，不该被标记成「已用/已注入」。
+  return { text: parts.join('\n'), ids: [...head, ...tail].map((h) => h.id) }
 }

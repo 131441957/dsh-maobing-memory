@@ -6,21 +6,24 @@
 
 > ## 💰 装之前先读：这个插件会让你的对话变贵
 >
-> 默认开启「反思轮」——**每轮对话结束后会多跑一个极短的模型回合**（只输出一行情绪值）。
+> 默认开启「反思轮」——**每 3 轮对话结束后多跑一个极短的模型回合**（只输出一行情绪值 + 顺带写记忆）。
 >
-> **单轮 token 开销约为普通对话的 2 倍。** 按量付费的话，这会直接翻在你的账单上。
+> **平均下来，每 3 轮对话多付约 1 轮的开销。** 按量付费的话，这会体现在你的账单上。
 >
-> **不想付这个钱就关掉它**（不影响记忆功能）：
+> 想再省就把它调稀（`reflectEveryN` 调大），或者干脆关掉（不影响记忆的注入与检索）：
 >
 > ```yaml
 > # profile 的 cordis.patch.yml
 > - id: maobing-memory
 >   name: "maobing-memory"
 >   config:
->     reflect: false
+>     reflectEveryN: 10      # 每 10 轮才反思一次（默认 3）
+>     # reflect: false       # 或者彻底关掉
 > ```
 >
 > 关掉之后：记忆照常注入与检索、面板照常可用；只是**不再自动从对话里写新记忆**，情绪也不再自动更新（要手动记就走 `memory_remember` 工具）。
+>
+> 反过来说，`reflectEveryN: 1` 就是「每轮都反思」的旧行为——那才是把单轮开销翻倍的那档。
 
 DSH（DeepSeek Harness）的跨会话记忆插件：把对话里值得长期记住的东西存成结构化条目，之后按需自动带回上下文，并附一个可浏览、可检索、可整理的面板。
 
@@ -76,7 +79,8 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
   name: "maobing-memory"
   config:
     sidebarLabel: "记忆"      # 侧栏显示文字，默认「小毛病」，改完刷新页面生效
-    reflect: false            # 关掉反思轮（见下方「成本提示」）
+    reflectEveryN: 5          # 每 5 轮反思一次（默认 3；1 = 每轮都反思，最贵）
+    hitMinScore: 6            # 每轮注入的最低总分（0 = 不过滤）
     dreamAt: "22:00"          # 每日整理时间
 ```
 
@@ -85,13 +89,15 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 | `enabled` | `true` | 总开关 |
 | `sidebarLabel` | `小毛病` | 侧栏图标显示文字，最长 24 字；纯显示，不影响功能 |
 | `injectEnabled` | `true` | 是否注入（首轮快照 + 每轮命中） |
-| `reflect` | `true` | 反思轮：每轮结束让模型回顾本轮、顺带写记忆与情绪 |
+| `reflect` | `true` | 反思轮总开关：攒够轮次后让模型回顾、顺带写记忆与情绪 |
+| `reflectEveryN` | `3` | 每 N 轮真实对话反思一次（`1` = 每轮都反思，旧行为） |
+| `hitMinScore` | `6` | 每轮注入的最低总分（`0` = 不过滤）；库小于 200 条时自动按比例放宽 |
 | `recallTopK` | `3` | 每轮注入**全文**的条数 |
 | `recallIndexLimit` | `8` | 每轮额外注入**一行索引**的条数（`0` = 关掉混合注入） |
 | `dreamAt` | `22:00` | 每日整理时间（24 小时制） |
 | `dbPath` | 自动 | 自定义记忆库路径（一般不用设） |
 
-（默认配置下每轮会多花一个模型回合，见最上方的成本提示。）
+（默认配置下每 3 轮会多花一个模型回合，见最上方的成本提示。）
 
 **关于注入宽度**：默认是「省档」——3 条给全文、8 条只给一行索引（`#id [项目] 标签… ｜ 判断句开头…`）。索引的作用是让模型知道「库里还有这些」，需要细节它会自己 `memory_read` 去读。
 
@@ -99,6 +105,10 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 |---|---|---|---|
 | 省（默认） | `recallTopK: 3` `recallIndexLimit: 8` | 约 1300 字 | 日常 |
 | 全 | `recallTopK: 5` `recallIndexLimit: 20` | 约 2800 字 | 记忆很多、问题很杂时 |
+
+**关于总分门槛**（`hitMinScore`）：每轮命中的总分 = `(BM25 + 标签加权) × 重要性 × 强度 × 新鲜度`，低于门槛的**全文和索引都不给**。为什么要有：记忆一多，每轮的 top11 里常夹着几条只是撞上「记忆」「插件」这种通用词的条目，白烧 token。门槛按「命中一个稀有词」定标：库里 500 条上下时约 6 分，且**按库容量自适应**——只有 20 条记忆的新装库，同样的命中只值 4 分左右，固定 6 分会把正确答案一起砍掉。想更严就调高，想回到旧行为写 `0`。
+
+另外，查询里「的/了/是/在/什么/怎么/为什么/吗/呢/吧」这类词会先被剔掉再检索（中文是逐字切词的，不剔的话「什么」会变成 `什`+`么` 两个几乎条条都命中的噪声 token）。
 
 ## 工具（12 个）
 
@@ -176,7 +186,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 
 ## 已知限制
 
-- **反思轮有成本**：默认每轮多一个极短模型回合，单轮开销约为普通对话两倍（可关）
+- **反思轮有成本**：默认每 3 轮多一个极短模型回合（`reflectEveryN` 可调大，或直接 `reflect: false`）
 - **面板能改字段，但不做界面级校验**：判断句/依据/标签/项目/类型/重要性都能在详情抽屉里改，但类型与重要性只做下拉选择，不做语义检查
 - **没有被动共鸣**：情绪只由当前对话决定，不随召回的旧记忆牵引
 - **检索只有 BM25**：不做向量检索，同义不同词可能搜不到（靠标签和索引缓解，不根治）
@@ -205,7 +215,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 npm install            # 装 esbuild / typescript
 npm run build          # 构建 → lib/
 npm run pack           # 打包 → dist/maobing-memory-<版本>.tgz
-node scripts/smoke.mjs # 冒烟测试（116 项，不启动 DSH）
+node scripts/smoke.mjs # 冒烟测试（146 项，不启动 DSH）
 
 # 从 meow-memory 迁移历史记忆（可选；必须给 --src，加 --go 才真写库）
 node scripts/migrate-from-meow.mjs --src "<meow 的 memory.db 路径>"
@@ -229,3 +239,30 @@ scripts/        smoke.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-fro
 ```
 
 ⚠️ `scripts/*.ps1` 必须保持 **UTF-8 带 BOM + CRLF**，否则 Windows PowerShell 5.1 会按 GBK 读中文导致语法报错。
+
+## 发布前检查清单
+
+改完代码、发版之前，按顺序做完这 5 步。**冒烟全过 ≠ 真机能跑**，第 3~5 步必须做：
+
+1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **146 项全过**（`FAIL` 一条都不许有，退出码 0）
+   - 新增或改过的断言必须过**变异测试**：故意把对应逻辑改坏，确认这条断言真的会变红（否则它只是个印着 `ok` 的摆设）
+2. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链）
+3. **重启后看日志三行**（`<DSH_HOME>/storages/maobing-memory/maobing-memory.log`）：
+   - `启动：版本 …`
+   - `就绪：工具 12 个，记忆 N（活跃 X / 归档 Y），注入=on(总分≥6)，反思=on(每3轮)，整理 22:00`
+   - `[dsh-maobing-memory] routes: /maobing-memory/stats …`
+4. **整理接口空跑**：`GET /maobing-memory/dream`（**不带** `go=1`）应返回 `dryRun: true`，且前后 `/maobing-memory/stats` 的数字**一个都没变**
+5. **面板过一遍**：打开侧栏，五个标签页（总览 / 记忆 / 笔记 / 检索 / 整理）各点一次，重点看总览的日志卡、检索的「总分等式」有没有崩
+
+> `/dream` 带 `go=1` 才会真跑衰减；空跑不写 `meta.lastDreamDay` 是**故意的**（否则当晚的定时整理会因为「今天已经跑过」被跳过）。
+
+## 已知的技术陷阱
+
+| 陷阱 | 说明 |
+|---|---|
+| `output.render` 必须返回 `ContentBlock[]` | 返回字符串会让宿主抛 `content.some is not a function` |
+| 配置项要**三处齐全** | schema / `DEFAULTS` / `resolveConfig`，漏第三处会静默失效（冒烟里有断言兜） |
+| 冒烟的静态断言要过变异测试 | 否则可能是假的 `ok()` |
+| 改 host 端代码后必须重启 DSH | `plugin_manager` 启停不刷模块缓存 |
+| `.ps1` 必须 UTF-8 带 BOM + CRLF | 否则 PowerShell 5.1 按 GBK 读中文会语法报错 |
+| 编辑工具写文件会丢 BOM | 改完 `.ps1` 要补回 BOM |

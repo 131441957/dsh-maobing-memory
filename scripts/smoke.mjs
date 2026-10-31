@@ -149,6 +149,62 @@ ok(!thirdText.includes('可能相关的记忆'), 'inject: 同一批命中不重�
 const otherSession = await preStep({ agent: { session: { header: { id: 'sess-other' } } } }, async () => decision([userMsg('新会话第一句')]))
 ok((otherSession?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory').length === 1, 'inject: 新会话重新给快照')
 
+// 纯停用词查询不该注入命中块（否则「为什么/什么」这类词会按噪声捞一堆）
+// 注意：这里必须先埋一条**含「为/样」**的记忆，否则停用词清洗就算失效也捞不到东西，
+// 断言就退化成永远 ok（2026-10-31 变异测试抓到的坑）。
+{
+  await remember.execute(
+    { judgment: '冒烟停用词：为了这样那样才写的', reasoning: '变异测试用靶子', tags: ['停用词', '靶子'], project: 'smoke', type: 'knowledge', importance: 1 },
+    {},
+  )
+  const p = { agent: { session: { header: { id: 'sess-stopword' } } } }
+  await preStep(p, async () => decision([userMsg('你好')]))
+  const sw = await preStep(p, async () => decision([userMsg('为什么怎么样？')]))
+  const injected = (sw?.messages ?? []).filter((m) => m?.source?.kind === 'plugin:dsh-maobing-memory')
+  const swText = String(injected[0]?.content?.[0]?.text ?? '')
+  ok(injected.length === 1 && !swText.includes('可能相关的记忆'), 'inject: 纯停用词查询不注入命中块（只带情绪）')
+  ok(swText.includes('【情绪】'), 'inject: 没有命中时情绪行照带')
+}
+
+// ── 查询清洗 / 分数门槛（纯函数，直接验，不依赖 DSH）──────────────────────
+{
+  const t = host._testing
+  ok(t !== undefined && typeof t.sanitizeQuery === 'function', 'score: 暴露了 _testing 钩子')
+  const clean = t.sanitizeQuery('这个插件为什么叫小毛病？')
+  ok(!clean.includes('为什么') && !clean.includes('这个'), 'score: 多字停用词被整段剔掉')
+  ok(t.tokenize(t.sanitizeQuery('什么怎么样为什么')).length === 0, 'score: 纯停用词清洗后没有 token')
+  ok(t.tokenize(t.sanitizeQuery('为什么')).length === 0, 'score: 「为什么」不会再漏出「为」这种 token')
+  ok(t.tokenize('构建命令是什么').includes('构') && !t.tokenize('构建命令是什么').includes('什'),
+    'score: 实词保留、疑问词丢弃')
+  ok(Math.abs(t.rareTokenIdf(566) - 5.94) < 0.06, `score: 566 条库里「一个稀有词」≈6 分（算得 ${t.rareTokenIdf(566).toFixed(2)}）`)
+  ok(t.effectiveMinScore(6, 566) === 6, 'score: ≥200 条的库用原阈值 6')
+  ok(t.effectiveMinScore(6, 3) < 0.2, 'score: 3 条的小库按容量放宽（否则一条都注入不出来）')
+  ok(t.effectiveMinScore(0, 566) === 0, 'score: 阈值 0 = 关闭过滤')
+
+  const mkRow = (id, judgment) => ({ id, type: 'knowledge', judgment, reasoning: '', tags: JSON.stringify(['冒烟', '门槛']), project: 'smoke', strength: 1, importance: 2, updated_at: Date.now() })
+  const genericRows = Array.from({ length: 30 }, (_, i) => mkRow(i + 1, `冒烟门槛第 ${i + 1} 条：今天天气不错`))
+  ok(host.buildHits(genericRows, '天', { k: 3, indexLimit: 3, minScore: 6 }) === null,
+    'score: 只撞上通用单字的命中被门槛整块砍掉')
+  ok(host.buildHits(genericRows, '天', { k: 3, indexLimit: 3, minScore: 0 }) !== null,
+    'score: 同一批数据 minScore=0 时仍会注入（对照组，证明是门槛砍的）')
+
+  const rareRows = Array.from({ length: 20 }, (_, i) =>
+    mkRow(i + 1, i < 5 ? `冒烟回填：稀有锚爪词第 ${i + 1} 条` : `无关条目 ${i + 1}：天气记录`))
+  const filled = host.buildHits(rareRows, '稀有锚爪词', { k: 2, indexLimit: 2, minScore: 6 })
+  ok(filled !== null && filled.ids.length >= 2 && filled.ids.length <= 4,
+    `score: 过滤后按 k+indexLimit 截断（实得 ${filled?.ids.length ?? 0} 条，k=2 index=2）`)
+  ok(filled !== null && filled.text.includes('其他可能相关'), 'score: 过滤后仍会给出索引段')
+  ok(filled !== null && !filled.ids.includes(20), 'score: 无关条目不会挤进注入列表')
+
+  // 小库补偿：24 条小库里一条「只值 4 分上下」的相关记忆必须仍能注入。
+  // 若阈值不按库容量放宽（= 硬 6 分），这条会被饿死 —— 变异测试就是打这里。
+  const thinRow = (id, judgment) => ({ id, type: 'knowledge', judgment, reasoning: '', tags: JSON.stringify(['冒烟', '小库']), project: 'smoke', strength: 1, importance: 1, updated_at: Date.now() })
+  const smallRows = Array.from({ length: 24 }, (_, i) =>
+    thinRow(i + 1, i < 2 ? `冒烟小库：孤锚第 ${i + 1} 条` : `无关条目 ${i + 1}：天气记录`))
+  const smallHits = host.buildHits(smallRows, '孤锚', { k: 3, indexLimit: 3, minScore: 6 })
+  ok(smallHits !== null && smallHits.ids.includes(1), 'score: 小库里 4 分上下的相关记忆也能注入（阈值按容量放宽）')
+}
+
 // ── 整理（衰减 → 归档，不删）─────────────────────────────────────────────
 const dream = registered.get('memory_dream')
 ok(typeof dream?.execute === 'function', 'dream: 注册了 memory_dream 工具')
@@ -330,7 +386,7 @@ ok(host.formatMoodLine(mm1).startsWith('【情绪】喜'), 'mood: formatMoodLine
 ok(host.approach(baseMood, { anger: 99 }).anger <= 1, 'mood: 超过 1 会被夹到 1')
 ok(registered.get('memory_mood') === undefined, 'mood: 手动拨情绪的工具已移除（情绪只由对话触发）')
 
-// ── 反思轮（记忆 + 情绪一次调用，三层防循环）──────────────────────────────
+// ── 反思轮（记忆 + 情绪一次调用；四层闸门 + 每 N 轮一次）────────────────────
 const turnStopping = handlers.get('agent/turn-stopping')
 const sessionEvent = handlers.get('session/event')
 ok(typeof turnStopping === 'function', 'reflect: 注册了 agent/turn-stopping')
@@ -348,18 +404,44 @@ const mkAgent = (sid) => ({
   followup: (m) => followups.push(m),
 })
 
-turnStopping({ agent: mkAgent('sess-reflect'), turn: 1 })
-ok(followups.length === 1, 'reflect: 第一轮排了一次反思')
-turnStopping({ agent: mkAgent('sess-reflect'), turn: 2 })
-ok(followups.length === 1, 'reflect: 冷却期内不重复排（防循环）')
+// reflectEveryN 默认 3：前两轮不排，第三轮才排（每轮都排 = 烧钱 + 记忆碎片化）
+turnStopping({ agent: mkAgent('sess-n3'), turn: 1 })
+ok(followups.length === 0, 'reflect: 第 1 轮不排（reflectEveryN=3）')
+turnStopping({ agent: mkAgent('sess-n3'), turn: 1 })
+ok(followups.length === 0, 'reflect: 同一 turn 重复触发不重复计数')
+turnStopping({ agent: mkAgent('sess-n3'), turn: 2 })
+ok(followups.length === 0, 'reflect: 第 2 轮仍不排')
+turnStopping({ agent: mkAgent('sess-n3'), turn: 3 })
+ok(followups.length === 1, 'reflect: 攒满 3 轮排一次反思')
 
-// 反思轮自己的结束（最近用户消息含标记）不触发
-const agentSelf = mkAgent('sess-self')
+// 排出来的反思消息：带防循环标记 + 带「相似度 ≥0.7 必须 update」的硬规则
+const reflectMsg = String(followups[0]?.content?.[0]?.text ?? '')
+ok(reflectMsg.includes('[maobing-memory-reflect]'), 'reflect: 反思消息带防循环标记')
+ok(reflectMsg.includes('0.70') && reflectMsg.includes('memory_update') && reflectMsg.includes('禁止'),
+  'reflect: 提示词里有「≥0.70 必须 memory_update、禁止新建」的硬规则')
+ok(reflectMsg.includes('任意一条 ≥ 0.70') && reflectMsg.includes('禁止再 memory_remember 新建'),
+  'reflect: 硬规则的措辞与阈值就是定的那版（0.70 / 禁止新建）')
+
+// 反思轮自己的结束（最近用户消息含标记）不触发、且计数器归零
+const agentSelf = mkAgent('sess-n3')
 agentSelf.session.events = () => [
   { type: 'user/message', data: { content: [{ type: 'text', text: '[maobing-memory-reflect] 回顾刚才这一轮' }] } },
 ]
-turnStopping({ agent: agentSelf, turn: 3 })
+turnStopping({ agent: agentSelf, turn: 4 })
 ok(followups.length === 1, 'reflect: 反思轮自己不再套娃')
+turnStopping({ agent: mkAgent('sess-n3'), turn: 5 })
+turnStopping({ agent: mkAgent('sess-n3'), turn: 6 })
+ok(followups.length === 1, 'reflect: 反思后计数器归零（不会下一轮立刻又排）')
+// 冷却还挡着的时候，就算攒满 N 轮也不排（这是防无限套娃的最后一层）
+turnStopping({ agent: mkAgent('sess-n3'), turn: 7 })
+ok(followups.length === 1, 'reflect: 冷却期内攒满也不排（防无限套娃）')
+
+// 不同会话各自计数
+turnStopping({ agent: mkAgent('sess-other-n'), turn: 1 })
+turnStopping({ agent: mkAgent('sess-other-n'), turn: 2 })
+ok(followups.length === 1, 'reflect: 新会话从 0 开始攒（不会继承别的会话的计数）')
+turnStopping({ agent: mkAgent('sess-other-n'), turn: 3 })
+ok(followups.length === 2, 'reflect: 新会话攒满 3 轮同样排一次')
 
 // 解析反思结果 → 写记忆
 const reflectJson = JSON.stringify({

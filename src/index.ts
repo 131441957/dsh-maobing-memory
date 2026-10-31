@@ -8,9 +8,9 @@ import z from '@deepseek-ai/schemastery'
 import { readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { defaultDbPath, getById, insertMemory, listActive, listPage, markRecalled, openDb, recentMemories, setMemoryStatus, statsOf, updateMemory, type ListStatus, type MemoryRow } from './db.js'
-import { search } from './bm25.js'
+import { rareTokenIdf, sanitizeQuery, search, tokenize } from './bm25.js'
 import { decayAndArchive, startDreamScheduler, type DecayResult } from './dream.js'
-import { buildHits, buildSnapshot, createPluginMessage, toDocs } from './inject.js'
+import { buildHits, buildSnapshot, createPluginMessage, effectiveMinScore, toDocs } from './inject.js'
 import { deleteNote, listNotes, noteDocs, notesDir, readNote, syncNotesFromDisk, updateNote, writeNote, type NoteUpdatePatch } from './notes.js'
 import { approach, decayedMood, formatMoodLine, writeMood } from './mood.js'
 import { createLogger, type Logger } from './logger.js'
@@ -79,6 +79,20 @@ export const config = z.object({
   injectEnabled: z.boolean().default(true),
   /** 反思轮：每轮结束后让主模型回顾本轮并自报记忆与情绪。 */
   reflect: z.boolean().default(true),
+  /**
+   * 反思轮频率：每 N 轮**真实对话**排一次反思（默认 3；1 = 每轮都排，旧行为）。
+   *
+   * 为什么要这个：每轮排一次时，单轮 token 开销约翻倍，而且**记忆碎片化**——每轮只看
+   * 一小段对话，同一件事分两三轮回写成两三条，之后就变成重复条目。
+   */
+  reflectEveryN: z.number().min(1).max(50).default(3),
+  /**
+   * 每轮注入的最低总分（默认 6；0 = 不过滤）。
+   *
+   * 总分 =（BM25 + 标签）× 重要 × 强度 × 新鲜度，换算关系见 `effectiveMinScore`：
+   * 500 条库里「命中一个稀有词」大概就是 6 分，低于它基本都是撞上了「记忆/插件」这类通用词。
+   */
+  hitMinScore: z.number().min(0).max(50).default(6),
   /** 每轮**给全文**的命中条数（默认 3，即「省档」；调大覆盖更全但更贵）。 */
   recallTopK: z.number().min(0).max(10).default(3),
   /** 每轮额外给**一行索引**的条数（默认 8；设为 0 等于关掉混合注入）。 */
@@ -109,6 +123,8 @@ interface ResolvedConfig {
   dbPath?: string
   injectEnabled: boolean
   reflect: boolean
+  reflectEveryN: number
+  hitMinScore: number
   recallTopK: number
   recallIndexLimit: number
   dreamAt: string
@@ -119,6 +135,8 @@ const DEFAULTS: ResolvedConfig = {
   enabled: true,
   injectEnabled: true,
   reflect: true,
+  reflectEveryN: 3,
+  hitMinScore: 6,
   recallTopK: 3,
   recallIndexLimit: 8,
   dreamAt: '22:00',
@@ -133,6 +151,15 @@ function resolveConfig(raw: unknown): ResolvedConfig {
     dbPath: typeof src.dbPath === 'string' && src.dbPath.trim() ? src.dbPath.trim() : undefined,
     injectEnabled: typeof src.injectEnabled === 'boolean' ? src.injectEnabled : DEFAULTS.injectEnabled,
     reflect: typeof src.reflect === 'boolean' ? src.reflect : DEFAULTS.reflect,
+    // 夹取在 resolveConfig 也做一遍：宿主没跑 schema 校验时（冒烟直接调 apply({})）也不能出现 0 或 NaN
+    reflectEveryN:
+      typeof src.reflectEveryN === 'number' && Number.isFinite(src.reflectEveryN)
+        ? Math.min(50, Math.max(1, Math.round(src.reflectEveryN)))
+        : DEFAULTS.reflectEveryN,
+    hitMinScore:
+      typeof src.hitMinScore === 'number' && Number.isFinite(src.hitMinScore)
+        ? Math.min(50, Math.max(0, src.hitMinScore))
+        : DEFAULTS.hitMinScore,
     recallTopK: typeof src.recallTopK === 'number' ? src.recallTopK : DEFAULTS.recallTopK,
     recallIndexLimit:
       typeof src.recallIndexLimit === 'number' ? src.recallIndexLimit : DEFAULTS.recallIndexLimit,
@@ -156,7 +183,8 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   log.info(`启动：版本 ${BUILD_TAG}，库 ${path}`)
   log.info(
     `就绪：工具 12 个，记忆 ${stat.total}（活跃 ${stat.active} / 归档 ${stat.archived}），` +
-      `注入=${cfg.injectEnabled ? 'on' : 'off'}，反思=${cfg.reflect ? 'on' : 'off'}，整理 ${cfg.dreamAt}`,
+      `注入=${cfg.injectEnabled ? `on(总分≥${cfg.hitMinScore})` : 'off'}，` +
+      `反思=${cfg.reflect ? `on(每${cfg.reflectEveryN}轮)` : 'off'}，整理 ${cfg.dreamAt}`,
   )
 
   // ── 工具注册 ──────────────────────────────────────────────────────────────
@@ -579,7 +607,12 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
       // 而且模型看到索引知道「库里还有这些」，需要细节会自己 memory_read。
       //
       // `seen` 是会话级去重：同一批命中不重复注入，否则连着几轮都是同样几条，白烧 token。
-      const hits = buildHits(rows, query, { k: cfg.recallTopK, indexLimit: cfg.recallIndexLimit, seen })
+      const hits = buildHits(rows, query, {
+        k: cfg.recallTopK,
+        indexLimit: cfg.recallIndexLimit,
+        seen,
+        minScore: cfg.hitMinScore,
+      })
       const moodLine = formatMoodLine(decayedMood(db))
       if (hits === null) {
         // 没命中记忆也把情绪带上（它是状态，不是检索结果）
@@ -1150,20 +1183,27 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
     },
   })
 
-  // ── 反思轮：每轮结束回顾一次（写记忆 + 情绪自评，一次调用两件事）──────────
+  // ── 反思轮：每 N 轮结束回顾一次（写记忆 + 情绪自评，一次调用两件事）──────────
   const REFLECT_MARKER = '[maobing-memory-reflect]'
-  // ── 反思轮：每轮结束让模型回顾一下，顺带写记忆与情绪 ──────────────────────
+  // ── 反思轮：攒够 N 轮（reflectEveryN）才让模型回顾一次 ────────────────────
   //
-  // 三层防循环，缺一层就会无限套娃（曾连续触发十余轮）：
+  // 四层闸门，缺一层就会出问题（前三层是防无限套娃，第四层是防「太密」）：
   //  ①反射消息标记：插件自己插入的反思指令带 [maobing-memory-reflect] 前缀，
   //    下一轮进来先看最近一条用户消息是不是它——是就跳过（否则反思的反思的反思…）；
   //  ②同 turn 不重复排：reflectQueuedTurn 记着「这一轮已经排过」，重复的 pre-step 不排；
   //  ③冷却时间戳**只能刷新不能 delete**：早期写的是 delete，等于冷却记录消失，
   //    下一轮又能排——这就是当初无限循环的直接原因。
   //    （用 set 刷新时间戳，记录一直在，冷却才真的有效。）
+  //  ④轮次计数 reflectTurns：每轮真实对话 +1，攒够 reflectEveryN 才排一次，排完归零。
+  //    为什么要有：每轮都反思不只贵（单轮 token 翻倍），还会**把同一件事切成好几条**记忆
+  //    （每轮只看到一小段对话），之后就变成重复条目。
   const reflectQueuedTurn = new Map<string, number>()
   /** sid → 上次排反思的时间戳。**只刷新、不删除**（删掉 = 冷却失效 = 无限套娃）。 */
   const reflectCooldown = new Map<string, number>()
+  /** sid → 距上次反思攒了几轮真实对话。 */
+  const reflectTurns = new Map<string, number>()
+  /** sid → 最近一次被计入计数的 turn 号（同一轮多次触发只算一次）。 */
+  const reflectCountedTurn = new Map<string, number>()
   const REFLECT_COOLDOWN_MS = 60_000
 
   /** 反思提示词（内嵌：esbuild 不打 .md；源码同份在 src/prompts/zh/reflect.md）。
@@ -1174,9 +1214,15 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
     '回顾从上次反思到现在的对话，做两件事。',
     '',
     '【一】用工具处理记忆（写入前必须先查重）',
+    '',
+    '**硬规则（违反就算这次反思失败）**：',
+    '调用 memory_find_similar / memory_search 后，只要返回的相似度里有**任意一条 ≥ 0.70**，',
+    '就必须 `memory_update` **那一条**（补充、纠正、合并都写进它），**禁止再 memory_remember 新建**。',
+    '只有「查不到任何 ≥ 0.70 的」才允许新建。宁可把老条目改得更全，也不要新建一条像它的。',
+    '（同一个东西换个说法，分数就会掉到 0.7 以下——拿不准就换 2~3 组说法各查一次，别偷懒只查一次。）',
+    '',
     '1. 有价值的东西：新的事实、拍板的决策、约定、偏好、踩过的坑与修法、被用户纠正的地方。',
-    '   → 先 memory_search（或 memory_find_similar）查库里有没有近似条目：',
-    '     有就 memory_update 补充/纠正，没有才 memory_remember 新建。**不要造重复条目。**',
+    '   → 先 memory_find_similar（或 memory_search）查重，再按上面的硬规则决定 update / remember。',
     '2. 上下文里注入的记忆如果有已经过时的、写错的，→ memory_update 修正，或改成 archived。',
     '3. 没有值得记的就什么都不做（不要硬凑）。',
     '',
@@ -1222,11 +1268,8 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
       if (agent?.session?.header?.origin === 'subagent') return
       const sid = String(agent?.session?.header?.id ?? 'unknown')
 
-      // ① 冷却（唯一靠得住的闸门；必须刷新时间戳，绝不能 delete）
-      const last = reflectCooldown.get(sid) ?? 0
-      if (Date.now() - last < REFLECT_COOLDOWN_MS) return
-
-      // ② 本 turn 已反思过（最近一条用户消息就是反思指令）→ 跳过
+      // ① 本 turn 就是反思轮（最近一条用户消息就是反思指令）→ 不计数、不套娃。
+      //    顺序很关键：这一支必须排在「计数」之前，否则反思轮自己会被当成一次真实对话。
       const events = eventsOf(agent)
       let lastUser = ''
       for (let i = events.length - 1; i >= 0; i--) {
@@ -1237,10 +1280,32 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
       }
       if (lastUser.includes(REFLECT_MARKER)) {
         reflectCooldown.set(sid, Date.now()) // 反思轮自己结束，续一次冷却
+        reflectTurns.set(sid, 0) // 这一段已经反思过了，计数器归零重新攒
         return
       }
 
-      // ③ 同一 turn 不重复排
+      // ② 攒轮次：同一 turn 只计一次（重复的 turn-stopping 不能把 1 轮当 2 轮）
+      let turns = reflectTurns.get(sid) ?? 0
+      const alreadyCounted = turn !== undefined && reflectCountedTurn.get(sid) === turn
+      if (!alreadyCounted) {
+        turns += 1
+        reflectTurns.set(sid, turns)
+        if (turn !== undefined) {
+          reflectCountedTurn.set(sid, turn)
+          while (reflectCountedTurn.size > 200) {
+            const oldest = reflectCountedTurn.keys().next().value
+            if (oldest === undefined) break
+            reflectCountedTurn.delete(oldest)
+          }
+        }
+      }
+      if (turns < cfg.reflectEveryN) return
+
+      // ③ 冷却（唯一靠得住的闸门；必须刷新时间戳，绝不能 delete）
+      const last = reflectCooldown.get(sid) ?? 0
+      if (Date.now() - last < REFLECT_COOLDOWN_MS) return
+
+      // ④ 同一 turn 不重复排
       if (turn !== undefined && reflectQueuedTurn.get(sid) === turn) return
 
       const followup = (agent as { followup?: (m: unknown) => void })?.followup
@@ -1248,6 +1313,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
 
       followup.call(agent, createPluginMessage(`${REFLECT_MARKER}\n\n${REFLECT_PROMPT}`))
       reflectCooldown.set(sid, Date.now())
+      reflectTurns.set(sid, 0)
       if (turn !== undefined) {
         reflectQueuedTurn.set(sid, turn)
         while (reflectQueuedTurn.size > 200) {
@@ -1256,7 +1322,9 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
           reflectQueuedTurn.delete(oldest)
         }
       }
-      log.warn(`[dsh-maobing-memory] 反思轮已排队 sid=${sid.slice(0, 8)} turn=${turn ?? '-'}`)
+      log.warn(
+        `[dsh-maobing-memory] 反思轮已排队 sid=${sid.slice(0, 8)} turn=${turn ?? '-'}（每 ${cfg.reflectEveryN} 轮一次）`,
+      )
     } catch (e) {
       log.warn(`[dsh-maobing-memory] 反思轮排队失败（忽略）：${e instanceof Error ? e.message : String(e)}`)
     }
@@ -1423,3 +1491,7 @@ export { findMergeCandidates, mergeMemories } from './merge.js'
 
 export { buildHits, buildSnapshot } from './inject.js'
 export { decayAndArchive } from './dream.js'
+
+/** 冒烟专用：把「查询清洗 / 分词 / 阈值当量」直接暴露出来，好在不启 DSH 的情况下单测。
+ *  宿主只用 tools / apply / 槽位，不会碰这几个名字。 */
+export const _testing = { sanitizeQuery, tokenize, rareTokenIdf, effectiveMinScore }
