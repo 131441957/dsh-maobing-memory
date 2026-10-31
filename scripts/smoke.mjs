@@ -128,6 +128,62 @@ ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具�
   ok(base.length > 0 && uns.includes(base), '卸载: uninstall.ps1 的摘除正则认得出 install.ps1 写的名字（改名漏改 = 卸载残留）')
 }
 
+// ── 防「注释与文案腐烂」的护栏 ────────────────────────────────────────────
+// 背景：2026-10-31 审计发现 4 处注释在说谎（「骨架版 0.1.0…注入留给后续版本」「0.4.0」「一次 POST /update」），
+// 其中一条还是**模型可见的工具描述**。注释没有测试，只能靠这两条断言兜住最常见的腐烂形态。
+{
+  // 只取注释文本（跳过字符串字面量，避免把文案当注释）
+  const collectComments = (src) => {
+    const out = []
+    let i = 0
+    let q = null
+    while (i < src.length) {
+      const c = src[i]
+      const c2 = src[i + 1]
+      if (q) {
+        if (c === '\\') { i += 2; continue }
+        if (c === q) q = null
+        i += 1
+        continue
+      }
+      if (c === '/' && c2 === '/') { let j = src.indexOf('\n', i); if (j < 0) j = src.length; out.push(src.slice(i, j)); i = j; continue }
+      if (c === '/' && c2 === '*') { let j = src.indexOf('*/', i + 2); if (j < 0) j = src.length; out.push(src.slice(i, j + 2)); i = j + 2; continue }
+      if (c === '"' || c === "'" || c === '`') { q = c; i += 1; continue }
+      i += 1
+    }
+    return out
+  }
+  const srcNames = ['index.ts', 'client.ts', 'db.ts', 'bm25.ts', 'inject.ts', 'mood.ts', 'dream.ts', 'merge.ts', 'notes.ts', 'logger.ts']
+  const badPhrases = ['骨架版', '留给后续', '以后实现', '待实现', '暂未实现']
+  const offenders = []
+  for (const f of srcNames) {
+    const comments = collectComments(readFileSync(join(root, 'src', f), 'utf8'))
+    const blob = comments.join('\n')
+    for (const p of badPhrases) if (blob.includes(p)) offenders.push(`${f}「${p}」`)
+    if (/(?:见|参见|看)\s*L\d+/.test(blob) || /\/\/\s*L\d+/.test(blob)) offenders.push(`${f} 行号引用`)
+    // 文件头注释里不许写版本号（「0.4.0：面板重做」就是这么烂掉的）；先剥掉 IP，别把 127.0.0.1 当版本
+    const header = comments.find((c) => c.startsWith('/*')) ?? ''
+    if (/\d+\.\d+\.\d+/.test(header.replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, ''))) offenders.push(`${f} 头注释版本号`)
+  }
+  ok(offenders.length === 0, `注释护栏: 无承诺式措辞/行号/版本号（违规: ${offenders.slice(0, 3).join('、') || '无'}）`)
+
+  // 模型可见的工具描述：产物里抓一遍（顺便验「lib 与 src 同步」这条老要求）
+  // 注意两点：①esbuild 默认 charset=ascii，中文会变成 \uXXXX（× 这类还会变成 \xXX）；
+  //          ②描述里带双引号时 esbuild 会改用单引号包裹，所以两种引号都要认。
+  const decode = (s) =>
+    s.replace(/\\u([0-9a-fA-F]{4})/g, (_m, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/\\x([0-9a-fA-F]{2})/g, (_m, h) => String.fromCharCode(parseInt(h, 16)))
+  const bundle = decode(readFileSync(join(root, 'lib', 'index.js'), 'utf8'))
+  const descs = [
+    ...bundle.matchAll(/name: "(\w+)",\s*description:\s*(?:"([^"]*)"|'((?:[^'\\]|\\.)*)')/g),
+  ].map((m) => ({ name: m[1], desc: (m[2] ?? m[3] ?? '').replace(/\\(["'])/g, '$1') }))
+  ok(descs.length === 12, `文案护栏: 产物里能读出 12 个工具描述（实得 ${descs.length}）`)
+  const stale = descs.filter((t) => /骨架|暂未|待实现|稍后|TBD|待补/.test(t.desc))
+  ok(stale.length === 0, `文案护栏: 工具描述无过期措辞（违规: ${stale.map((t) => t.name).join(',') || '无'}）`)
+  const thin = descs.filter((t) => t.desc.trim().length < 12)
+  ok(thin.length === 0, `文案护栏: 工具描述都写清了用途（过短: ${thin.map((t) => t.name).join(',') || '无'}）`)
+}
+
 
 const remember = registered.get('memory_remember')
 const res = await remember.execute(
