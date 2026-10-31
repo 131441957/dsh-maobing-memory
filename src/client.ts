@@ -14,7 +14,17 @@ import { createElement as h, useCallback, useEffect, useMemo, useState } from 'r
 export const inject = ['slots']
 
 const PLUGIN_ID = 'dsh-maobing-memory'
-const BASE = `/${PLUGIN_ID}`
+/**
+ * 面板请求的 host 路由前缀。
+ *
+ * ⚠️ **它故意不等于 `PLUGIN_ID`**：host 端路由一直挂在 `/maobing-memory/*` 上
+ * （数据目录同名、前端 20+ 处写死、改名无收益，是项目红线）。2026-10-31 改名到
+ * `dsh-maobing-memory` 时这里跟着 PLUGIN_ID 一起变，结果面板**所有接口 404**——
+ * 而冒烟只验了 host 端的 HTTP_ROUTES，一条都没拦住。现在改成显式常量，
+ * 并在冒烟里加了「client 前缀必须等于 host 路由前缀」的断言。
+ */
+const ROUTE_PREFIX = 'maobing-memory'
+const BASE = `/${ROUTE_PREFIX}`
 
 // ── 设计令牌（全部用 DSH 主题变量，跟随明暗切换）─────────────────────────────
 const T = {

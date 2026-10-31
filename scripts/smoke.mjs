@@ -92,6 +92,25 @@ ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具�
   )
 }
 
+// client 与 host 的路由前缀必须一致
+// （2026-10-31 踩过：改名时 client 的 BASE 跟着 PLUGIN_ID 变成 /dsh-maobing-memory，
+//   而 host 路由按红线仍是 /maobing-memory/*，结果面板所有接口 404，冒烟却全绿。）
+{
+  const clientSrc = readFileSync(join(root, 'src', 'client.ts'), 'utf8')
+  const hostSrc = readFileSync(join(root, 'src', 'index.ts'), 'utf8')
+  const m = /const ROUTE_PREFIX = '([^']+)'/.exec(clientSrc)
+  ok(m !== null, 'client: 路由前缀是显式常量 ROUTE_PREFIX')
+  const prefix = m?.[1] ?? ''
+  const hostPaths = [...hostSrc.matchAll(/url\.pathname === '(\/[^']+)'/g)].map((x) => x[1])
+  ok(hostPaths.length > 0, `client: 能从 host 源码里提取到完整路由路径（${hostPaths.length} 条）`)
+  const mismatch = hostPaths.filter((p) => !p.startsWith(`/${prefix}/`))
+  ok(
+    mismatch.length === 0,
+    `client: 面板请求前缀与 host 路由一致（client=${prefix}${mismatch.length ? `，不一致: ${mismatch.slice(0, 3).join(',')}` : ''}）`,
+  )
+  ok(!/BASE = `\/\$\{PLUGIN_ID\}`/.test(clientSrc), 'client: BASE 不再由 PLUGIN_ID 拼出来（改名就会 404）')
+}
+
 
 const remember = registered.get('memory_remember')
 const res = await remember.execute(
