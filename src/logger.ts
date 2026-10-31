@@ -1,5 +1,5 @@
 /**
- * maobing-memory — 简单文件日志。
+ * dsh-maobing-memory — 简单文件日志。
  *
  * 为什么不直接用 ctx.logger：
  *   DSH 的运行时日志只落 error/warn，info 级别看不到；而且所有插件的日志混在一个文件里，

@@ -1,5 +1,5 @@
 /**
- * maobing-memory — 情绪四轴（mood）。
+ * dsh-maobing-memory — 情绪四轴（mood）。
  *
  * 四对互斥轴（设计参考 angel_memory 的 SoulState，代码自写）：
  *   喜↔悲 joy ／ 怒↔恐 anger ／ 意料中↔出乎意料 surprise ／ 厌恶↔认可 disgust

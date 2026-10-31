@@ -1,5 +1,5 @@
 /**
- * maobing-memory — 注入层。
+ * dsh-maobing-memory — 注入层。
  *
  * 两条注入路径（都插成独立 plugin 消息，不改写用户 prompt）：
  *  1. 首轮快照：本会话第一条真实用户消息前，插一份按项目分组的记忆概览。

@@ -243,17 +243,18 @@ scripts/        smoke.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-fro
 
 ## 发布前检查清单
 
-改完代码、发版之前，按顺序做完这 5 步。**冒烟全过 ≠ 真机能跑**，第 3~5 步必须做：
+改完代码、发版之前，按顺序做完这 6 步。**冒烟全过 ≠ 真机能跑**，第 4~6 步必须做：
 
 1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **160 项全过**（`FAIL` 一条都不许有，退出码 0）
    - 新增或改过的断言必须过**变异测试**：故意把对应逻辑改坏，确认这条断言真的会变红（否则它只是个印着 `ok` 的摆设）
-2. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链、install 自己建的空 `node_modules` 也要被收掉）
-3. **重启后看日志三行**（`<DSH_HOME>/storages/maobing-memory/maobing-memory.log`）：
+2. **注释体检**：`node scripts/comment-audit.mjs` —— 应 exit 0；它会列出注释里的承诺式措辞（「骨架版/留给后续」）、行号引用、头注释版本号，这几类**必然过期**，冒烟只兜最常见的形态，剩下的靠这一步读一眼
+3. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链、install 自己建的空 `node_modules` 也要被收掉）
+4. **重启后看日志三行**（`<DSH_HOME>/storages/maobing-memory/maobing-memory.log`）：
    - `启动：版本 …`
    - `就绪：工具 12 个，记忆 N（活跃 X / 归档 Y），注入=on(总分≥6)，反思=on(每3轮)，整理 22:00`
    - `[dsh-maobing-memory] routes: /maobing-memory/stats …`
-4. **整理接口空跑**：`GET /maobing-memory/dream`（**不带** `go=1`）应返回 `dryRun: true`，且前后 `/maobing-memory/stats` 的数字**一个都没变**
-5. **面板过一遍**：打开侧栏，五个标签页（总览 / 记忆 / 笔记 / 检索 / 整理）各点一次，每个 tab 都必须看到**真数据**——出现「数据接口异常：… → HTTP 404」就是接口前缀对不上（2026-10-31 v0.1.0 真踩过：client 的 `BASE` 跟着插件改名变成了 `/dsh-maobing-memory`，而 host 路由仍是 `/maobing-memory/*`，面板全 404，而冒烟当时只验了 host 侧）
+5. **整理接口空跑**：`GET /maobing-memory/dream`（**不带** `go=1`）应返回 `dryRun: true`，且前后 `/maobing-memory/stats` 的数字**一个都没变**
+6. **面板过一遍**：打开侧栏，五个标签页（总览 / 记忆 / 笔记 / 检索 / 整理）各点一次，每个 tab 都必须看到**真数据**——出现「数据接口异常：… → HTTP 404」就是接口前缀对不上（2026-10-31 v0.1.0 真踩过：client 的 `BASE` 跟着插件改名变成了 `/dsh-maobing-memory`，而 host 路由仍是 `/maobing-memory/*`，面板全 404，而冒烟当时只验了 host 侧）
 
 > `/dream` 带 `go=1` 才会真跑衰减；空跑不写 `meta.lastDreamDay` 是**故意的**（否则当晚的定时整理会因为「今天已经跑过」被跳过）。
 

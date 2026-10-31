@@ -1,5 +1,5 @@
 /**
- * maobing-memory — 每日整理（0.3 起点：衰减 + 归档）。
+ * dsh-maobing-memory — 每日整理（三档衰减 → 归档，永不物理删除）。
  *
  * 三档策略（照 angel_memory 的设计思路，自己实现）：
  *  - T0（useful_score < 3）：每次整理 strength -= 0.02（约 50 天归零）

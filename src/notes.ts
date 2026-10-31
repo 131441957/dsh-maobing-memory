@@ -1,5 +1,5 @@
 /**
- * maobing-memory — 笔记（notes）。
+ * dsh-maobing-memory — 笔记（notes）。
  *
  * 笔记是**长文**，和记忆（一句判断句）分开存：正文落 Markdown 文件，SQLite 只存索引。
  * 这样正文能整篇读、能按行分页、用户也能直接拿编辑器改文件。
