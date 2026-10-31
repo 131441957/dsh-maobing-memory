@@ -7,7 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
-import { collectComments } from './lib/comment-scan.mjs'
+import { collectComments, stripComments } from './lib/comment-scan.mjs'
 
 const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 let failed = 0
@@ -156,6 +156,22 @@ ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具�
   }
   ok(offenders.length === 0, `注释护栏: 无承诺式措辞/行号/版本号（违规: ${offenders.slice(0, 3).join('、') || '无'}）`)
   ok(blind.length === 0, `注释护栏自检: 扫描器没瞎（可疑: ${blind.join(',') || '无'}）`)
+
+  // 词法自检：拿一段同时含「正则里的引号」「字符串里的 //」的样本，钉住这两条边界。
+  // 这既守住了 notes.ts 那个坑，也顺便让 stripComments（用来证明「只改了注释」）有测试兜着。
+  const sample = String.raw`const re = /[<>:"/\\|?*]/g
+// 注释甲
+const s = 'http://example.com//x' // 注释乙`
+  const sampleComments = collectComments(sample).map((c) => c.text.trim())
+  ok(
+    sampleComments.length === 2 && sampleComments.every((t) => t.includes('注释甲') || t.includes('注释乙')),
+    `注释护栏自检: 正则字面量/字符串里的 // 不干扰扫描（扫到 ${sampleComments.length} 条注释）`,
+  )
+  const stripped = stripComments(sample)
+  ok(
+    !stripped.includes('注释') && stripped.includes('example.com//x') && stripped.includes('/[<>:"/\\\\|?*]/g'),
+    '注释护栏自检: stripComments 认同一套词法（只去注释，不伤字符串与正则）',
+  )
 
   // 模型可见的工具描述：产物里抓一遍（顺便验「lib 与 src 同步」这条老要求）
   // 注意两点：①esbuild 默认 charset=ascii，中文会变成 \uXXXX（× 这类还会变成 \xXX）；

@@ -53,7 +53,15 @@ function slugify(title: string): string {
   return (safe.length > 60 ? safe.slice(0, 60) : safe) || 'untitled'
 }
 
-/** 写一篇笔记：正文存文件，索引进 SQLite。同标题不覆盖，每次都是新文件。 */
+/** 写一篇笔记：正文存文件，索引进 SQLite。同标题不覆盖，每次都是新文件。
+ *
+ *  为什么是「先 INSERT 占位、再 UPDATE 补名字」两步：文件名要带自增 id（`<id>-<slug>.md`），
+ *  而 `path` 列是 `NOT NULL UNIQUE`，只能先插空串拿到 id，再写真正的文件名。
+ *  ⚠️ 副作用：占位那一瞬间 `path = ''`，**同一时刻并发写两条会撞 UNIQUE 约束**。
+ *  目前所有调用点（工具 / sync）都是顺序调用，撞不到；要支持并发就得改成「先落文件再入索引」。
+ *  ⚠️ `chars` 最后写的是**文件全文长度**（含 `# 标题` 行与结尾换行），不是 `body.length`——
+ *  面板列表里显示的「N 字」就是这个数。
+ */
 export function writeNote(
   db: DatabaseSync,
   dir: string,
@@ -79,7 +87,13 @@ export function writeNote(
   return db.prepare('SELECT * FROM note WHERE id = ?').get(id) as unknown as NoteRow
 }
 
-/** 改一篇笔记：title / body / tags 任意字段；body 变了就重写文件并重算 chars。 */
+/** 改一篇笔记：title / body / tags 任意字段；body 变了就重写文件并重算 chars。
+ *
+ *  同一个 patch 里同时给多个字段时的**语义顺序**（改之前先看这里）：
+ *  1. `body` 非空就走「整体替换」分支，此时 H1 用 `nextTitle`（body 自带 `# ` 开头则原样用）；
+ *  2. 否则先 `replace` 后 `append` —— 顺序反了会先追加再替换，非常反直觉；
+ *  3. `append` 会先吃掉正文尾部空白再续（`text.replace(/\s+$/, '')`），所以反复 append 不会越积越空。
+ */
 export interface NoteUpdatePatch {
   title?: string
   /** 整体替换正文（慎用：要交全文） */
@@ -148,6 +162,12 @@ export function listNotes(db: DatabaseSync, dir: string, opts: { limit?: number;
   }
 }
 
+/** 摘要：现读文件取正文前 N 字（去掉首行标题）。
+ *
+ *  每次列列表都会把**本页涉及的每个文件读一遍**（50 篇 = 50 次读盘）。盘上都是几十 KB 的
+ *  markdown，代价可以接受；真要优化就把 excerpt 缓存进 note 表，**别**在这里加全局缓存
+ *  （那会引入「文件改了缓存不失效」的脏读）。
+ */
 function excerptOf(dir: string, row: NoteRow, len: number): string {
   try {
     const text = readFileSync(join(dir, row.path), 'utf8')
@@ -173,7 +193,12 @@ export interface NoteRead {
   hasMore?: boolean
 }
 
-/** 按行读正文：offset 1-based，limit 行数上限（默认 400 行 / 约 3 万字）。 */
+/** 按行读正文：offset 1-based，limit 行数上限（默认 400 行 / 约 3 万字）。
+ *
+ *  ⚠️ `totalLines` 取的是 `readFileSync(...).split('\n').length`：文件以换行结尾时会**多算 1 行**，
+ *  于是最后一页的 `hasMore` 可能还是 true、翻过去却是空的。已知，记在 TODO 技术债里，暂不改
+ *  （改了会影响「读下一段」的边界行为，要连冒烟一起动）。
+ */
 export function readNote(
   db: DatabaseSync,
   dir: string,
@@ -200,7 +225,11 @@ export function readNote(
   }
 }
 
-/** 全部笔记的正文（检索语料）。 */
+/** 全部笔记的正文（检索语料）。
+ *
+ *  `memory_note_search` 走这条：**每次检索都全量读盘**（当前量级几十篇，可接受；上千篇就得改缓存）。
+ *  文件被删了直接跳过，别让一篇坏文件拖垮整个检索。
+ */
 export function noteDocs(db: DatabaseSync, dir: string): Array<{ id: number; title: string; text: string; tags: string[]; updatedAt: number }> {
   const rows = db.prepare('SELECT * FROM note').all() as unknown as NoteRow[]
   const out: Array<{ id: number; title: string; text: string; tags: string[]; updatedAt: number }> = []
@@ -223,7 +252,11 @@ export function noteDocs(db: DatabaseSync, dir: string): Array<{ id: number; tit
   return out
 }
 
-/** 删一篇笔记（文件 + 索引）。 */
+/** 删一篇笔记（文件 + 索引）。
+ *
+ *  顺序是故意的：先删文件，删失败也继续删索引。索引才是「真相」——留一条指向不存在文件的索引会让
+ *  列表/检索一直报错；反过来留个孤儿 .md 无害（下次 syncNotesFromDisk 还会把它捡回来）。
+ */
 export function deleteNote(db: DatabaseSync, dir: string, id: number): boolean {
   const row = db.prepare('SELECT * FROM note WHERE id = ?').get(id) as unknown as NoteRow | undefined
   if (!row) return false
@@ -237,7 +270,12 @@ export function deleteNote(db: DatabaseSync, dir: string, id: number): boolean {
   return true
 }
 
-/** 启动时扫描目录，把手动丢进来的 .md 纳入索引（文件名里没有 id 的，分配一个）。 */
+/** 启动时扫描目录，把手动丢进来的 .md 纳入索引（文件名里没有 id 的，分配一个）。
+ *
+ *  - 幂等靠 `path` 列的 UNIQUE + 先查一遍已知文件名；所以**改文件名等于改 path**，会被当成
+ *    新笔记重新纳入（旧索引还在，要清得手工来）；
+ *  - `updated_at` 用文件的 **mtime**（不是当前时间），这样手动编辑过的文件会自然排到列表前面。
+ */
 export function syncNotesFromDisk(db: DatabaseSync, dir: string): number {
   if (!existsSync(dir)) return 0
   let added = 0
