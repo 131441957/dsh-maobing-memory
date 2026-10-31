@@ -1,8 +1,9 @@
 /**
- * maobing-memory — 存储层（骨架版）。
+ * dsh-maobing-memory — 存储层（SQLite / node:sqlite）。
  *
  * 记忆单元 = 判断句 + 依据 + 标签 + 强度 + 项目。
- * 强度衰减到 0 一律归档（status='archived'），永不物理删除。
+ * 强度衰减到 0 一律归档（status='archived'），**永不物理删除**——所以 status 只有 active / archived 两个值。
+ * 这一层只碰数据、不碰业务判断：检索排序在 bm25.ts，衰减策略在 dream.ts。
  */
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync } from 'node:fs'

@@ -1,8 +1,22 @@
 /**
- * maobing-memory — host 端（骨架版 0.1.0）。
+ * dsh-maobing-memory — host 端（DSH 插件宿主侧）。
  *
- * 这一版只做最小闭环：能加载、能注册工具、能建库、能在 pre-step 记一笔日志。
- * 真正的注入 / 检索 / 整理 / 面板数据留给后续版本。
+ * 这个文件只做「接线」：读配置 → 开库 → 注册 12 个工具 → 注册 17 条面板路由
+ * → 挂注入钩子（首轮快照 + 每轮 BM25 命中）→ 挂反思轮（每 N 轮一次）→ 起每日整理调度。
+ * 真正的算法都在同目录的独立模块里（db / bm25 / inject / mood / notes / merge / dream / logger），
+ * 所以它很长但并不复杂。**要读懂结构，看下面这些 `── ` 分区注释即可：**
+ *
+ *   ── 配置（schema / DEFAULTS / resolveConfig）
+ *   ── 工具注册 1~12（写 / 找 / 读 / 改 四组）
+ *   ── 面板数据路由 `/maobing-memory/*`（按 pathname 匹配，**不校验 HTTP 方法**）
+ *   ── 注入：首轮快照 + 每轮 BM25 命中
+ *   ── 笔记工具（正文落 Markdown 文件，库里只存索引）
+ *   ── 记忆读取 / 修改工具
+ *   ── 反思轮（每 N 轮回顾一次：模型自己调工具写记忆 + 最后输出一行情绪）
+ *   ── 每日整理（默认 22:00，衰减 → 归档，不删）
+ *
+ * 为什么不拆成多个文件：见 TODO 的 P2「拆分大文件」。要点是——长的是「注册动作」而不是逻辑，
+ * 拆的收益只是好看，成本是冒烟里 4 处按**文件路径**抓源码的断言必须同步改，否则会变成假绿。
  */
 import z from '@deepseek-ai/schemastery'
 import { readFileSync } from 'node:fs'
@@ -269,7 +283,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   // ── 工具 2：看最近记忆 ──────────────────────────────────────────────────
   const disposeRecent = ctx.tools.register({
     name: 'memory_recent',
-    description: '列出最近的长期记忆（骨架版：只按更新时间倒序，检索留给后续版本）。',
+    description: '按更新时间倒序列出最近的记忆（只排序、不做检索；要按关键词找用 memory_search）。',
     parameters: {
       type: 'object',
       additionalProperties: false,

@@ -1,13 +1,23 @@
 /**
- * maobing-memory — client 端（0.4.0：面板重做）。
+ * dsh-maobing-memory — client 端（面板）。
  *
  * 信息架构参考 angel_memory 的 dashboard（侧栏导航式布局、统计卡片、筛选栏 + 表格 + 详情），
  * 代码全部自写（React + DSH 主题 token），未使用其 Vue 代码。
  *
  * 挂载：
  *  - sidebar.panellist：左侧栏「记忆」图标
- *  - main(key=maobing-memory)：中央整页面板
- * 数据全部走 host 只读路由 /maobing-memory/{stats,list,search,dream-log,dream}。
+ *  - main(key=`dsh-maobing-memory`)：中央整页面板（总览 / 记忆 / 笔记 / 检索 / 整理 五个 tab）
+ *
+ * 数据全部走 host 路由 `/maobing-memory/*`（**注意前缀不是插件名**，见下面 ROUTE_PREFIX）：
+ *  - 只读：stats / list / search / mood / log / notes / note / merge-candidates / ui-config / dream-log
+ *  - 有副作用：update / mark / mark-batch / merge / note-delete / dream?go=1
+ *
+ * 这些**全用 GET**（含写操作）：host 按 pathname 匹配、不校验 HTTP 方法，面板统一走 getJson 省事。
+ * 只监听 127.0.0.1 + 单机单用户的前提下可以接受；真要对外多用户，就得改 POST + 校验，
+ * 否则任何本地页面都能替你归档记忆。这条记在 TODO 的「技术债」里。
+ *
+ * 分区（改哪块直接按下面的 `// ── ` 找）：
+ *   ── 设计令牌 / 类型 / 工具函数 / 小组件 / 表格行 / 详情抽屉 / 主面板
  */
 import { createElement as h, useCallback, useEffect, useMemo, useState } from 'react'
 
@@ -391,7 +401,9 @@ function RowItem({
  *
  * 编辑态为什么是「整套表单」而不是逐字段就地编辑：
  *  - 改多字段时逐个 PATCH 会连发好几条请求，中间态还可能被并发覆盖；
- *  - 一次 POST `/update` 带齐所有字段，服务端一次写库，要么全成要么全不动。
+ *  - 一次 `GET /update?…` 带齐所有字段，服务端一次写库，要么全成要么全不动。
+ *    （是 GET 而不是 POST：面板所有请求都过 getJson，host 也只按 pathname 匹配不校验方法；
+ *      写操作走 GET 的代价见文件头的说明。）
  *
  * 保存成功后**关掉抽屉并刷新列表**，不用返回的 row 就地更新：
  * 更新后 `updated_at`、`strength` 这些派生字段会变，抽屉里的旧快照会跟列表不一致，
