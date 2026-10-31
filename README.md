@@ -215,7 +215,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 npm install            # 装 esbuild / typescript
 npm run build          # 构建 → lib/
 npm run pack           # 打包 → dist/maobing-memory-<版本>.tgz
-node scripts/smoke.mjs # 冒烟测试（160 项，不启动 DSH）
+node scripts/smoke.mjs # 冒烟测试（161 项，不启动 DSH）
 node scripts/comment-audit.mjs # 注释体检：密度分类 + 列出可疑注释（承诺词/行号/版本号），干净时 exit 0
 
 # 从 meow-memory 迁移历史记忆（可选；必须给 --src，加 --go 才真写库）
@@ -236,7 +236,8 @@ src/notes.ts    笔记：文件读写、按行分页、append/replace
 src/logger.ts   文件日志（同步追加、2MB 滚动、写失败静默）
 src/client.ts   面板：侧栏图标 + 整页仪表盘 + 情绪/日志卡
 build.mjs       esbuild 出 lib/index.js 与 lib/client.js
-scripts/        smoke.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-from-meow.mjs
+scripts/        smoke.mjs / comment-audit.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-from-meow.mjs
+scripts/lib/    comment-scan.mjs（注释扫描：认得字符串与正则字面量）
 ```
 
 ⚠️ `scripts/*.ps1` 必须保持 **UTF-8 带 BOM + CRLF**，否则 Windows PowerShell 5.1 会按 GBK 读中文导致语法报错。
@@ -245,7 +246,7 @@ scripts/        smoke.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-fro
 
 改完代码、发版之前，按顺序做完这 6 步。**冒烟全过 ≠ 真机能跑**，第 4~6 步必须做：
 
-1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **160 项全过**（`FAIL` 一条都不许有，退出码 0）
+1. **构建 + 冒烟**：`npm run build && node scripts/smoke.mjs` —— 应 **161 项全过**（`FAIL` 一条都不许有，退出码 0）
    - 新增或改过的断言必须过**变异测试**：故意把对应逻辑改坏，确认这条断言真的会变红（否则它只是个印着 `ok` 的摆设）
 2. **注释体检**：`node scripts/comment-audit.mjs` —— 应 exit 0；它会列出注释里的承诺式措辞（「骨架版/留给后续」）、行号引用、头注释版本号，这几类**必然过期**，冒烟只兜最常见的形态，剩下的靠这一步读一眼
 3. **安装/卸载闭环**：`npm run pack` 后，在一个**隔离 profile** 上跑 `scripts\install.ps1`，再跑 `uninstall.ps1`，两次之后 profile 应**完全还原**（插件清单里没有残留、node_modules 里没有死链、install 自己建的空 `node_modules` 也要被收掉）

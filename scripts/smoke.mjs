@@ -7,6 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import vm from 'node:vm'
+import { collectComments } from './lib/comment-scan.mjs'
 
 const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 let failed = 0
@@ -132,40 +133,29 @@ ok(hostLogText.includes('就绪：工具 12 个'), 'host: 就绪日志含工具�
 // 背景：2026-10-31 审计发现 4 处注释在说谎（「骨架版 0.1.0…注入留给后续版本」「0.4.0」「一次 POST /update」），
 // 其中一条还是**模型可见的工具描述**。注释没有测试，只能靠这两条断言兜住最常见的腐烂形态。
 {
-  // 只取注释文本（跳过字符串字面量，避免把文案当注释）
-  const collectComments = (src) => {
-    const out = []
-    let i = 0
-    let q = null
-    while (i < src.length) {
-      const c = src[i]
-      const c2 = src[i + 1]
-      if (q) {
-        if (c === '\\') { i += 2; continue }
-        if (c === q) q = null
-        i += 1
-        continue
-      }
-      if (c === '/' && c2 === '/') { let j = src.indexOf('\n', i); if (j < 0) j = src.length; out.push(src.slice(i, j)); i = j; continue }
-      if (c === '/' && c2 === '*') { let j = src.indexOf('*/', i + 2); if (j < 0) j = src.length; out.push(src.slice(i, j + 2)); i = j + 2; continue }
-      if (c === '"' || c === "'" || c === '`') { q = c; i += 1; continue }
-      i += 1
-    }
-    return out
-  }
+  // 注释扫描器在 scripts/lib/comment-scan.mjs（认得字符串与**正则字面量**——
+  // 2026-10-31 这里栽过：notes.ts 的 /[<>:"/\\|?*]/ 让 quote-blind 的扫描器卡在字符串状态，
+  // 26 行注释只数到 9 行，护栏看着绿其实是瞎的。下面第 3 条断言就是防这个。）
   const srcNames = ['index.ts', 'client.ts', 'db.ts', 'bm25.ts', 'inject.ts', 'mood.ts', 'dream.ts', 'merge.ts', 'notes.ts', 'logger.ts']
   const badPhrases = ['骨架版', '留给后续', '以后实现', '待实现', '暂未实现']
   const offenders = []
+  const blind = []
   for (const f of srcNames) {
-    const comments = collectComments(readFileSync(join(root, 'src', f), 'utf8'))
-    const blob = comments.join('\n')
+    const src = readFileSync(join(root, 'src', f), 'utf8')
+    const comments = collectComments(src)
+    const blob = comments.map((c) => c.text).join('\n')
     for (const p of badPhrases) if (blob.includes(p)) offenders.push(`${f}「${p}」`)
     if (/(?:见|参见|看)\s*L\d+/.test(blob) || /\/\/\s*L\d+/.test(blob)) offenders.push(`${f} 行号引用`)
-    // 文件头注释里不许写版本号（「0.4.0：面板重做」就是这么烂掉的）；先剥掉 IP，别把 127.0.0.1 当版本
-    const header = comments.find((c) => c.startsWith('/*')) ?? ''
+    // 文件头注释里不许写版本号（「0.4.0：面板重做」就是这么烂掉的）；先剥掉 IP，别把 127.0.0.1 当版本。
+    // 注意：必须从**原始源码**抓首个 docblock —— 扫描器是按行拆的，`comments[0]` 只是那行 `/**`。
+    const header = /^\s*\/\*[\s\S]*?\*\//.exec(src)?.[0] ?? ''
     if (/\d+\.\d+\.\d+/.test(header.replace(/\b\d{1,3}(\.\d{1,3}){3}\b/g, ''))) offenders.push(`${f} 头注释版本号`)
+    // 扫描器自检：行首近似数是下界，扫描结果明显低于它就说明扫描器漏了
+    const naive = src.split('\n').filter((l) => /^\s*(\*|\/\/|\/\*)/.test(l)).length
+    if (naive > 5 && comments.length < naive * 0.8) blind.push(`${f}(${comments.length}/${naive})`)
   }
   ok(offenders.length === 0, `注释护栏: 无承诺式措辞/行号/版本号（违规: ${offenders.slice(0, 3).join('、') || '无'}）`)
+  ok(blind.length === 0, `注释护栏自检: 扫描器没瞎（可疑: ${blind.join(',') || '无'}）`)
 
   // 模型可见的工具描述：产物里抓一遍（顺便验「lib 与 src 同步」这条老要求）
   // 注意两点：①esbuild 默认 charset=ascii，中文会变成 \uXXXX（× 这类还会变成 \xXX）；
