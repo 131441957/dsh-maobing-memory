@@ -148,13 +148,13 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 
 ```
 ===== 长期记忆（maobing-memory）=====
-共 553 条记忆，按项目分组（每项最多 8 条）：
-【dsh】41 条
-- #1109 [skill] 主 harness 的 host 插件代码改动不会被热重载…
+共 42 条记忆，按项目分组（每项最多 8 条）：
+【web】12 条
+- #128 [knowledge] 这个项目的构建命令是 npm run build，产物落在 dist/…
 
 【笔记索引（要全文用 memory_note_read，要检索用 memory_note_search）】
-#2 maobing-memory 运维手册（7777 字）
-#1 maobing-memory 开发实录（4186 字）
+#2 部署检查清单（1200 字）
+#1 接口约定与错误码（860 字）
 
 【情绪】喜0.57 怒0.43 惊0.37 厌0.53
 ```
@@ -163,13 +163,13 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 
 ```
 可能相关的记忆，仅供参考：
-- #1105 [knowledge] 用户拍板的规格…（BM25 31.86，标签 +4）
-- #1104 [knowledge] maobing-memory 已转为可分发…（BM25 18.2）
-- #1137 [skill] 召回宽度问题与修法…（BM25 15.9）
+- #128 [knowledge] 这个项目的构建命令是 npm run build，产物落在 dist/…（BM25 31.86，标签 +4）
+- #052 [skill] 读写配置文件一律按 UTF-8，别依赖系统默认编码…（BM25 18.2）
+- #211 [event] 2026-10-30 约定：发版前先跑一遍冒烟，不绿就不打包…（BM25 15.9）
 
 【其他可能相关（只给索引，需要细节用 memory_read 读全文）】
-#1074 [meow-memory] meow-memory 已卸载 / 归档 archive / 库改名 _removed ｜ meow-memory 与它的查看面板…
-#944 [meow-panel] 给 meow-memory 自建的左侧栏面板插件…
+#094 [web] 部署 / 回滚 / 端口占用 ｜ 上线前按检查清单逐条过，别只跑构建…
+#175 [web] 跨域 / credentials / 预检缓存 ｜ 浏览器端这两个坑都会伪装成"随机失败"…
 
 （上面只是线索。若这些都不足以回答，用 memory_search 自己再搜一次，别凭印象编。）
 
