@@ -47,7 +47,7 @@ function snippetAround(text: string, query: string, len = 120): string {
 /** 构建标记：用来确认运行时到底加载的是哪一版（排查「改了没生效」用）。
  *  2026-10-31 换过一次：之前的 `mood-v3-…` 是情绪那一版留下的，改了几轮都没动它，
  *  结果日志里的「启动：版本 …」分不出新旧构建。以后每次发版/结构性改动都要改这里。 */
-const BUILD_TAG = 'v0.1.0-p0-2026-10-31'
+const BUILD_TAG = 'v0.1.1-2026-11-10'
 
 /** 模块级 logger：apply 里换成本插件自己的文件日志；未初始化前是空实现，绝不抛错。 */
 let log: Logger = {

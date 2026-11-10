@@ -924,7 +924,7 @@ function MemoryPanel(): unknown {
       { style: { display: 'flex', alignItems: 'center', gap: 8 } },
       h('span', { style: { width: 9, height: 9, borderRadius: 5, background: T.accent, display: 'inline-block' } }),
       h('span', { style: { fontSize: 16, fontWeight: 680, color: T.text } }, '小毛病记忆'),
-      h('span', { style: { fontSize: 11, color: T.text2 } }, '0.1.0'),
+      h('span', { style: { fontSize: 11, color: T.text2 } }, '0.1.1'),
     ),
     h('span', { style: { flex: 1 } }),
     tabBar,

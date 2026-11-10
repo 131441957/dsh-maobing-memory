@@ -1,6 +1,6 @@
 {
   "name": "dsh-maobing-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "description": "Cross-session memory for DeepSeek Harness: judgment-style memory entries with tags, strength decay, project grouping, BM25 recall and a browsable panel.",
   "type": "module",
