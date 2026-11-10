@@ -324,6 +324,42 @@ ok(archivedTotal >= 1, 'dream: 强度归零的记忆被归档（≥1 条）')
 const afterDream = await dream.execute({ dryRun: true }, {})
 ok(afterDream?.ok === true, 'dream: 整理后 dryRun 仍可用（库没被搞坏）')
 
+// ── 自动/手动整理（dreamAuto）─────────────────────────────────────────────
+{
+  // ① lastDreamInfo 是纯函数，直接验三种情况（面板「已 N 天未整理」全靠它）
+  const day = 86_400_000
+  const now = Date.parse('2026-11-10T12:00:00Z')
+  const fakeDb = (value) => ({
+    prepare: () => ({ get: () => (value === undefined ? undefined : { value }) }),
+  })
+  const never = host.lastDreamInfo(fakeDb(undefined), now)
+  ok(never.day === null && never.days === null, 'dream: 从没整理过时 lastDreamInfo 返回 day/days = null')
+  ok(host.lastDreamInfo(fakeDb('2026-11-10'), now).days === 0, 'dream: 今天整理过 → days = 0')
+  ok(host.lastDreamInfo(fakeDb('2026-11-09'), now).days === 1, 'dream: 昨天整理过 → days = 1')
+  ok(host.lastDreamInfo(fakeDb('2026-11-01'), now).days === 9, 'dream: 9 天前整理过 → days = 9')
+  ok(host.lastDreamInfo(fakeDb('not-a-date'), now).days === null, 'dream: meta 里存了坏值 → days = null（不让提醒崩）')
+
+  // ② 默认配置：日志里应该是「调度已启动」
+  const logText = readFileSync(hostLogPath, 'utf8')
+  ok(logText.includes('dream 调度已启动'), 'dreamAuto: 默认配置下注册了定时整理（日志含「调度已启动」）')
+
+  // ③ dreamAuto: false：另起一个独立库跑 apply，日志应是「已禁用（手动整理）」且**不含**已启动
+  const isoDir = mkdtempSync(join(tmpdir(), 'mbm-dreamoff-'))
+  const isoDb = join(isoDir, 'memory.db')
+  const isoCtx = {
+    logger: { info: () => {}, debug: () => {}, warn: () => {} },
+    tools: { register: () => () => {} },
+    on: () => () => {},
+    get: () => undefined,
+  }
+  await host.apply(isoCtx, { dbPath: isoDb, dreamAuto: false, reflect: false, injectEnabled: false })
+  const isoLog = join(isoDir, 'maobing-memory.log')
+  const isoText = existsSync(isoLog) ? readFileSync(isoLog, 'utf8') : ''
+  ok(isoText.includes('已禁用（手动整理）'), 'dreamAuto: false 时日志写明「已禁用（手动整理）」')
+  ok(!isoText.includes('dream 调度已启动'), 'dreamAuto: false 时**不注册**定时器（日志里没有「已启动」）')
+  ok(/上次整理\s*(\S+)/.test(isoText), 'dreamAuto: false 时日志带上「上次整理 …」（B 方案的提醒）')
+}
+
 // ── 记忆检索 / 读取 / 修改 ──────────────────────────────────────────────
 const memSearch = registered.get('memory_search')
 const memRead = registered.get('memory_read')

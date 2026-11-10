@@ -112,6 +112,24 @@ export function dreamRanToday(db: DatabaseSync, today = new Date().toISOString()
 }
 
 /**
+ * 上次整理是哪天、距今多少天（`dreamAuto: false` 时用来做「已 N 天未整理」的提醒）。
+ *
+ * 为什么单独一个函数：提醒要出现在两个地方（启动日志 + 面板「整理」tab），两处必须算得一模一样；
+ * 而且「从没整理过」和「昨天整理过」要能区分（前者 `day`/`days` 都是 null）。
+ * 只认 `YYYY-MM-DD`；meta 里存了怪值就当没有（返回 day、days 为 null），别让坏数据把提醒搞崩。
+ */
+export function lastDreamInfo(db: DatabaseSync, now = Date.now()): { day: string | null; days: number | null } {
+  const row = db.prepare(`SELECT value FROM meta WHERE key = 'lastDreamDay'`).get() as { value?: string } | undefined
+  const day = String(row?.value ?? '').trim() || null
+  if (!day || !/^\d{4}-\d{2}-\d{2}$/.test(day)) return { day, days: null }
+  const then = Date.parse(`${day}T00:00:00Z`)
+  const today = new Date(now).toISOString().slice(0, 10)
+  const now0 = Date.parse(`${today}T00:00:00Z`)
+  if (!Number.isFinite(then) || !Number.isFinite(now0)) return { day, days: null }
+  return { day, days: Math.max(0, Math.round((now0 - then) / 86_400_000)) }
+}
+
+/**
  * 按 HH:MM 每天跑一次。返回 disposer（timer 已 unref，不会拖住宿主退出）。
  * 每分钟检查一次，到点且当天没跑就执行。
  */

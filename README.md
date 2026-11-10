@@ -75,13 +75,14 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 在 profile 的 `cordis.patch.yml` 里给本插件加 `config:` 即可：
 
 ```yaml
-- id: maobing-memory
-  name: "maobing-memory"
+- id: dsh-maobing-memory
+  name: "dsh-maobing-memory"
   config:
     sidebarLabel: "记忆"      # 侧栏显示文字，默认「小毛病」，改完刷新页面生效
     reflectEveryN: 5          # 每 5 轮反思一次（默认 3；1 = 每轮都反思，最贵）
     hitMinScore: 6            # 每轮注入的最低总分（0 = 不过滤）
-    dreamAt: "22:00"          # 每日整理时间
+    dreamAuto: false          # 关掉自动整理，改成手动点（这台机器不常开机）
+    dreamAt: "22:00"          # 自动整理的时间（dreamAuto: true 时才有意义）
 ```
 
 | 配置项 | 默认值 | 说明 |
@@ -94,10 +95,11 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 | `hitMinScore` | `6` | 每轮注入的最低总分（`0` = 不过滤）；库小于 200 条时自动按比例放宽 |
 | `recallTopK` | `3` | 每轮注入**全文**的条数 |
 | `recallIndexLimit` | `8` | 每轮额外注入**一行索引**的条数（`0` = 关掉混合注入） |
-| `dreamAt` | `22:00` | 每日整理时间（24 小时制） |
+| `dreamAuto` | `true` | 是否自动每日整理。设 `false` 后只剩手动：面板「立即整理一次」按钮 / `memory_dream` 工具；启动日志与面板都会显示「已 N 天未整理」 |
+| `dreamAt` | `22:00` | 自动整理时间（24 小时制，`dreamAuto: true` 时生效） |
 | `dbPath` | 自动 | 自定义记忆库路径（一般不用设） |
 
-（默认配置下每 3 轮会多花一个模型回合，见最上方的成本提示。）
+（默认配置下每 3 轮会多花一个模型回合，见最上方的成本提示。**注意：每日整理（dream）不花 token**——它是纯本地 SQL 的三档衰减 + 归档，跑一次几百毫秒；花钱的只有反思轮和每轮注入。）
 
 **关于注入宽度**：默认是「省档」——3 条给全文、8 条只给一行索引（`#id [项目] 标签… ｜ 判断句开头…`）。索引的作用是让模型知道「库里还有这些」，需要细节它会自己 `memory_read` 去读。
 
@@ -182,7 +184,7 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 | 记忆 | 项目筛选、状态筛选、每页 50·100·200、多选批量归档恢复、合并候选、详情抽屉 |
 | 笔记 | 列表 + 阅读抽屉（按行分页，「读下一段」） |
 | 检索 | BM25 结果带可验算等式：`总分 = (bm25 + 标签) × 重要 × 强度 × 新鲜度` |
-| 整理 | 每日定时自动 + 手动触发 + 整理日志 |
+| 整理 | 自动/手动可切换（`dreamAuto`）+ 手动「立即整理一次」+ 上次整理距今几天 + 整理日志 |
 
 ## 已知限制
 

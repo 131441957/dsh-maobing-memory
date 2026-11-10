@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { defaultDbPath, getById, insertMemory, listActive, listPage, markRecalled, openDb, recentMemories, setMemoryStatus, statsOf, updateMemory, type ListStatus, type MemoryRow } from './db.js'
 import { rareTokenIdf, sanitizeQuery, search, tokenize } from './bm25.js'
-import { decayAndArchive, startDreamScheduler, type DecayResult } from './dream.js'
+import { decayAndArchive, lastDreamInfo, startDreamScheduler, type DecayResult } from './dream.js'
 import { buildHits, buildSnapshot, createPluginMessage, effectiveMinScore, toDocs } from './inject.js'
 import { deleteNote, listNotes, noteDocs, notesDir, readNote, syncNotesFromDisk, updateNote, writeNote, type NoteUpdatePatch } from './notes.js'
 import { approach, decayedMood, formatMoodLine, writeMood } from './mood.js'
@@ -113,8 +113,18 @@ export const config = z.object({
   recallTopK: z.number().min(0).max(10).default(3),
   /** 每轮额外给**一行索引**的条数（默认 8；设为 0 等于关掉混合注入）。 */
   recallIndexLimit: z.number().min(0).max(50).default(8),
-  /** 每日整理时间（HH:MM，24 小时制，默认 22:00）。 */
+  /** 每日整理时间（HH:MM，24 小时制，默认 22:00）。`dreamAuto: false` 时不用它。 */
   dreamAt: z.string().default('22:00'),
+  /**
+   * 是否**自动**每日整理（默认 true）。
+   *
+   * 关掉之后就只剩手动：面板「整理」tab 的「立即整理一次」按钮 + `memory_dream` 工具。
+   * 为什么要有这个开关（2026-11-10 用户要求）：整理是**纯本地 SQL**（不花 token），但「后台定时器」
+   * 本身是看不见的自动动作，而且它只在宿主活着且恰好到点那一分钟才生效（关机/休眠就漏跑）。
+   * 对不常开机的 PC 来说，手动点一次更可控。关掉后启动日志会写「已禁用（手动整理）」+ 上次整理日期，
+   * 面板也会显示「已 N 天未整理」，不会因为忘了而让库无限膨胀。
+   */
+  dreamAuto: z.boolean().default(true),
   /**
    * 侧栏图标的显示文字。
    * 默认「小毛病」是作者用的人格名，别人装可以改成自己喜欢的（比如「记忆」「Memory」）。
@@ -144,6 +154,7 @@ interface ResolvedConfig {
   recallTopK: number
   recallIndexLimit: number
   dreamAt: string
+  dreamAuto: boolean
   sidebarLabel: string
 }
 
@@ -156,6 +167,7 @@ const DEFAULTS: ResolvedConfig = {
   recallTopK: 3,
   recallIndexLimit: 8,
   dreamAt: '22:00',
+  dreamAuto: true,
   sidebarLabel: '小毛病',
 }
 
@@ -180,6 +192,7 @@ function resolveConfig(raw: unknown): ResolvedConfig {
     recallIndexLimit:
       typeof src.recallIndexLimit === 'number' ? src.recallIndexLimit : DEFAULTS.recallIndexLimit,
     dreamAt: typeof src.dreamAt === 'string' && src.dreamAt.trim() ? src.dreamAt.trim() : DEFAULTS.dreamAt,
+    dreamAuto: typeof src.dreamAuto === 'boolean' ? src.dreamAuto : DEFAULTS.dreamAuto,
     sidebarLabel:
       typeof src.sidebarLabel === 'string' && src.sidebarLabel.trim() ? src.sidebarLabel.trim().slice(0, 24) : DEFAULTS.sidebarLabel,
   }
@@ -200,7 +213,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   log.info(
     `就绪：工具 12 个，记忆 ${stat.total}（活跃 ${stat.active} / 归档 ${stat.archived}），` +
       `注入=${cfg.injectEnabled ? `on(总分≥${cfg.hitMinScore})` : 'off'}，` +
-      `反思=${cfg.reflect ? `on(每${cfg.reflectEveryN}轮)` : 'off'}，整理 ${cfg.dreamAt}`,
+      `反思=${cfg.reflect ? `on(每${cfg.reflectEveryN}轮)` : 'off'}，整理 ${cfg.dreamAuto ? cfg.dreamAt : '手动'}`,
   )
 
   // ── 工具注册 ──────────────────────────────────────────────────────────────
@@ -510,7 +523,15 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
               if (url.pathname === '/maobing-memory/dream-log') {
                 const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit') ?? 50)))
                 const rows = db.prepare('SELECT * FROM dream_log ORDER BY id DESC LIMIT ?').all(limit)
-                return json(res, 200, { rows })
+                // 面板「整理」tab 要用这三个字段显示「自动/手动 + 上次整理距今几天」
+                const info = lastDreamInfo(db)
+                return json(res, 200, {
+                  rows,
+                  dreamAuto: cfg.dreamAuto,
+                  dreamAt: cfg.dreamAt,
+                  lastDreamDay: info.day,
+                  daysSinceDream: info.days,
+                })
               }
               if (url.pathname === '/maobing-memory/dream') {
                 // 不带 go=1 就是空跑：完整算一遍并告诉你会发生什么，但不写库。
@@ -1468,11 +1489,35 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   // 【可拆性】这个工具只有十几行、调度器本身在 dream.ts，拆不拆都无所谓；
   // 真要拆就跟上面的工具区一起搬进 tools.ts（同源依赖：db / log / dream）。
   // 注意 `dryRun`（空跑）必须不写库也不写 meta.lastDreamDay，否则当晚的定时整理会被跳过。
+  //
+  // 自动/手动（`dreamAuto`）：整理是**纯本地 SQL、不花 token**，但定时器只在「宿主活着 + 恰好到点那一分钟」
+  // 时生效，关机就漏跑；不常开机的机器干脆关掉自动，改成手动点 + 「已 N 天未整理」提醒。
+  const dreamInfo = lastDreamInfo(db)
+  let stopScheduler: () => void = () => {}
+  if (cfg.dreamAuto) {
+    stopScheduler = startDreamScheduler(db, cfg.dreamAt, (r) => {
+      log.info(`[dsh-maobing-memory] ${cfg.dreamAt} 整理完成：衰减 ${r.decayed}，归档 ${r.archived}`)
+    })
+    log.info(`[dsh-maobing-memory] dream 调度已启动：每天 ${cfg.dreamAt}`)
+    if (dreamInfo.days !== null && dreamInfo.days >= 7) {
+      log.warn(
+        `[dsh-maobing-memory] 已有 ${dreamInfo.days} 天没整理（上次 ${dreamInfo.day}）——定时器只在到点那一刻生效，漏了就在面板手动点一次`,
+      )
+    }
+  } else {
+    const ago =
+      dreamInfo.days === null ? '（从没整理过）' : dreamInfo.days === 0 ? '（今天）' : `（${dreamInfo.days} 天前）`
+    log.info(
+      `[dsh-maobing-memory] dream 调度：已禁用（手动整理）——上次整理 ${dreamInfo.day ?? '从未'}${ago}；` +
+        '需要时在面板「整理」tab 点「立即整理一次」，或让模型调 memory_dream',
+    )
+  }
+
   const disposeDreamTool = ctx.tools.register({
     name: 'memory_dream',
     description:
       '手动触发一次整理：按强度三档衰减，强度归零的记忆转为归档（不删除）。' +
-      '平时每天 22:00 自动跑一次，这个工具用于调试或补跑。',
+      '默认每天 22:00 自动跑一次；配了 `dreamAuto: false` 时就只能手动调这个工具或点面板按钮。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1512,11 +1557,6 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
     },
   })
 
-  const stopScheduler = startDreamScheduler(db, cfg.dreamAt, (r) => {
-    log.info(`[dsh-maobing-memory] 22:00 整理完成：衰减 ${r.decayed}，归档 ${r.archived}`)
-  })
-  log.info(`[dsh-maobing-memory] dream 调度已启动：每天 ${cfg.dreamAt}`)
-
   ctx.on('dispose', () => {
     try {
       disposeRemember()
@@ -1547,7 +1587,7 @@ export { createLogger } from './logger.js'
 export { findMergeCandidates, mergeMemories } from './merge.js'
 
 export { buildHits, buildSnapshot } from './inject.js'
-export { decayAndArchive } from './dream.js'
+export { decayAndArchive, lastDreamInfo } from './dream.js'
 
 /** 冒烟专用：把「查询清洗 / 分词 / 阈值当量」直接暴露出来，好在不启 DSH 的情况下单测。
  *  宿主只用 tools / apply / 槽位，不会碰这几个名字。 */

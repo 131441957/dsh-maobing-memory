@@ -695,6 +695,13 @@ function MemoryPanel(): unknown {
   const [noteBusy, setNoteBusy] = useState(false)
   const [dreamLog, setDreamLog] = useState<DreamEntry[] | null>(null)
   const [dreamBusy, setDreamBusy] = useState(false)
+  /** 自动/手动整理 + 上次整理距今几天（由 /dream-log 一起带回来）。 */
+  const [dreamInfo, setDreamInfo] = useState<{
+    auto: boolean
+    dreamAt: string
+    lastDreamDay: string | null
+    daysSinceDream: number | null
+  } | null>(null)
 
   const load = useCallback(() => {
     setLoading(true)
@@ -738,8 +745,22 @@ function MemoryPanel(): unknown {
   }, [])
 
   const loadDreamLog = useCallback(() => {
-    getJson<{ rows: DreamEntry[] }>('/dream-log?limit=50')
-      .then((r) => setDreamLog(r.rows ?? []))
+    getJson<{
+      rows: DreamEntry[]
+      dreamAuto?: boolean
+      dreamAt?: string
+      lastDreamDay?: string | null
+      daysSinceDream?: number | null
+    }>('/dream-log?limit=50')
+      .then((r) => {
+        setDreamLog(r.rows ?? [])
+        setDreamInfo({
+          auto: r.dreamAuto !== false,
+          dreamAt: r.dreamAt ?? '22:00',
+          lastDreamDay: r.lastDreamDay ?? null,
+          daysSinceDream: r.daysSinceDream ?? null,
+        })
+      })
       .catch((e: unknown) => {
         setDreamLog([])
         setError(e instanceof Error && e.message.includes('404') ? '整理接口要重启插件才生效（host 端改动不会热重载）' : e instanceof Error ? e.message : String(e))
@@ -1336,7 +1357,16 @@ function MemoryPanel(): unknown {
           'div',
           null,
           h('div', { style: { fontSize: 13, fontWeight: 600, color: T.text } }, '每日整理'),
-          h('div', { style: { ...muted, marginTop: 4 } }, '每天 22:00 自动跑；三档衰减，强度归零转归档，正文永不删除。'),
+          h(
+            'div',
+            { style: { ...muted, marginTop: 4 } },
+            dreamInfo === null
+              ? '三档衰减，强度归零转归档，正文永不删除。'
+              : `${dreamInfo.auto ? `每天 ${dreamInfo.dreamAt} 自动跑` : '自动整理已关闭（手动）'} · ` +
+                `上次整理：${dreamInfo.lastDreamDay ?? '从未'}` +
+                (dreamInfo.daysSinceDream === null ? '' : `（${dreamInfo.daysSinceDream} 天前）`) +
+                ' · 三档衰减，强度归零转归档，正文永不删除。',
+          ),
         ),
         h('span', { style: { flex: 1 } }),
         h(Btn, { children: dreamBusy ? '整理中…' : '立即整理一次', onClick: runDream, kind: 'primary' }),
@@ -1348,7 +1378,12 @@ function MemoryPanel(): unknown {
         dreamLog === null
           ? h(Empty, { text: '读取中…' })
           : dreamLog.length === 0
-            ? h(Empty, { text: '还没有整理记录（22:00 自动跑，或点上面的按钮）' })
+            ? h(Empty, {
+                text:
+                  dreamInfo?.auto === false
+                    ? '还没有整理记录（自动整理已关闭，点上面的「立即整理一次」）'
+                    : '还没有整理记录（22:00 自动跑，或点上面的按钮）',
+              })
             : dreamLog.map((d) =>
                 h(
                   'div',
