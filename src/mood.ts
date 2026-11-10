@@ -45,6 +45,62 @@ export const MOOD_DEFAULTS = {
 
 export const DEFAULT_MOOD: Mood = { joy: 0.5, anger: 0.5, surprise: 0.5, disgust: 0.5, updated_at: 0 }
 
+/**
+ * 每根轴两端的说法。
+ *
+ * 为什么需要它：四轴是**双极**的，数字本身没有语义——`怒 0.28` 不是"不怎么生气"，
+ * 而是"偏忐忑"（0 = 忐忑，1 = 火大）。不给词，人看到 0.54/0.28/0.38/0.57 只会一脸问号。
+ * 措辞一律用「偏 X」而不是形容词本身，避免和目标情绪混淆。
+ */
+export const AXIS_ENDS: Record<Axis, { low: string; high: string }> = {
+  joy: { low: '丧', high: '开心' },
+  anger: { low: '忐忑', high: '火大' },
+  surprise: { low: '意料之中', high: '出乎意料' },
+  disgust: { low: '嫌弃', high: '认可' },
+}
+
+export interface AxisReading {
+  /** 原值 0~1 */
+  value: number
+  /** value − 0.5，正 = 偏高端，负 = 偏低端；保留两位。 */
+  delta: number
+  /** 人话：平常心 / 略偏忐忑 / 明显偏火大 */
+  word: string
+  /** 档位，面板据此决定颜色深浅；|Δ| < 0.08 平常心、< 0.22 略偏、其余明显。 */
+  band: 'neutral' | 'slight' | 'clear'
+}
+
+/** 把一根轴的数值翻成人话。 */
+export function readAxis(axis: Axis, value: number): AxisReading {
+  const v = clamp01(value)
+  const delta = Math.round((v - 0.5) * 100) / 100
+  const abs = Math.abs(delta)
+  if (abs < 0.08) return { value: v, delta, word: '平常心', band: 'neutral' }
+  const end = delta > 0 ? AXIS_ENDS[axis].high : AXIS_ENDS[axis].low
+  const band: AxisReading['band'] = abs >= 0.22 ? 'clear' : 'slight'
+  // 统一成「略偏 X / 明显偏 X」，读起来才不会像「略意料之中」这种半截话
+  return { value: v, delta, word: `${band === 'clear' ? '明显偏' : '略偏'}${end}`, band }
+}
+
+/** 四轴读数的整体一句话，例如「当前：明显偏忐忑（另有 1 轴略微偏移）」。 */
+export function moodSummary(mood: Mood): string {
+  const readings = AXES.map((a) => ({ axis: a, ...readAxis(a, mood[a]) }))
+  const byAbs = (x: AxisReading, y: AxisReading): number => Math.abs(y.delta) - Math.abs(x.delta)
+  const clear = readings.filter((r) => r.band === 'clear').sort(byAbs)
+  const slight = readings.filter((r) => r.band === 'slight').sort(byAbs)
+  if (clear.length === 0 && slight.length === 0) return '整体接近平常心'
+  const main = (clear.length > 0 ? clear : slight).slice(0, 2).map((r) => r.word)
+  const more = clear.length > 0 && slight.length > 0 ? `（另有 ${slight.length} 轴略微偏移）` : ''
+  return `当前：${main.join('、')}${more}`
+}
+
+/** 面板/接口用的完整读数（原值 + 每轴人话 + 一句总结）。 */
+export function moodReport(mood: Mood): Mood & { readings: Record<Axis, AxisReading>; summary: string } {
+  const readings = {} as Record<Axis, AxisReading>
+  for (const a of AXES) readings[a] = readAxis(a, mood[a])
+  return { ...mood, readings, summary: moodSummary(mood) }
+}
+
 function clamp01(v: number): number {
   if (!Number.isFinite(v)) return 0.5
   return Math.min(1, Math.max(0, v))

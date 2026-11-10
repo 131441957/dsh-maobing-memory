@@ -26,7 +26,7 @@ import { rareTokenIdf, sanitizeQuery, search, tokenize } from './bm25.js'
 import { decayAndArchive, lastDreamInfo, startDreamScheduler, type DecayResult } from './dream.js'
 import { buildHits, buildSnapshot, createPluginMessage, effectiveMinScore, toDocs } from './inject.js'
 import { deleteNote, listNotes, noteDocs, notesDir, readNote, syncNotesFromDisk, updateNote, writeNote, type NoteUpdatePatch } from './notes.js'
-import { approach, decayedMood, formatMoodLine, writeMood } from './mood.js'
+import { approach, decayedMood, formatMoodLine, moodReport, writeMood } from './mood.js'
 import { createLogger, type Logger } from './logger.js'
 import { findMergeCandidates, mergeMemories } from './merge.js'
 
@@ -487,7 +487,9 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
                 return json(res, 200, { label: cfg.sidebarLabel })
               }
               if (url.pathname === '/maobing-memory/mood') {
-                return json(res, 200, decayedMood(db))
+                // 返回的不只是四个数：每轴带人话（「明显偏忐忑」）和一句总结，
+                // 面板直接渲染，不用在浏览器里再实现一遍措辞（两处实现必然漂移）。
+                return json(res, 200, moodReport(decayedMood(db)))
               }
               if (url.pathname === '/maobing-memory/notes') {
                 const limit = Number(url.searchParams.get('limit') ?? 50)
@@ -1580,7 +1582,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   })
 }
 
-export { approach, regress, decayedMood, formatMoodLine, readMood, writeMood, DEFAULT_MOOD, AXES, AXIS_LABEL } from './mood.js'
+export { approach, regress, decayedMood, formatMoodLine, readMood, writeMood, DEFAULT_MOOD, AXES, AXIS_LABEL, AXIS_ENDS, readAxis, moodSummary, moodReport } from './mood.js'
 
 export { createLogger } from './logger.js'
 

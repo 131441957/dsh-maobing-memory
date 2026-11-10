@@ -520,6 +520,29 @@ ok(host.formatMoodLine(mm1).startsWith('【情绪】喜'), 'mood: formatMoodLine
 ok(host.approach(baseMood, { anger: 99 }).anger <= 1, 'mood: 超过 1 会被夹到 1')
 ok(registered.get('memory_mood') === undefined, 'mood: 手动拨情绪的工具已移除（情绪只由对话触发）')
 
+// 人话解读（2026-11-10 用户反馈「光看四组数字分不清什么情绪」）
+{
+  const neutral = host.readAxis('joy', 0.5)
+  ok(neutral.word === '平常心' && neutral.band === 'neutral', 'mood词: 0.5 → 平常心')
+  const slight = host.readAxis('joy', 0.58)
+  ok(slight.word === '略偏开心' && slight.band === 'slight' && slight.delta === 0.08, 'mood词: 0.58 → 略偏开心（slight）')
+  const clear = host.readAxis('anger', 0.28)
+  ok(clear.word === '明显偏忐忑' && clear.band === 'clear' && clear.delta === -0.22, 'mood词: 怒 0.28 → 明显偏忐忑（低端是忐忑，不是"不怎么生气"）')
+  ok(host.readAxis('surprise', 0.38).word === '略偏意料之中', 'mood词: 惊 0.38 → 略偏意料之中')
+  ok(host.readAxis('disgust', 0.62).word === '略偏认可', 'mood词: 厌 0.62 → 略偏认可')
+
+  const sample = { joy: 0.54, anger: 0.28, surprise: 0.38, disgust: 0.57, updated_at: 0 }
+  const summary = host.moodSummary(sample)
+  ok(summary.includes('明显偏忐忑'), `mood词: 一句话抓最偏离的轴（得到「${summary}」）`)
+  ok(host.moodSummary({ joy: 0.5, anger: 0.5, surprise: 0.5, disgust: 0.5, updated_at: 0 }) === '整体接近平常心', 'mood词: 四轴都在中线 → 「整体接近平常心」')
+
+  const report = host.moodReport(sample)
+  ok(
+    report.readings.anger.word === '明显偏忐忑' && typeof report.summary === 'string' && report.joy === 0.54,
+    'mood词: moodReport 同时给出原值、每轴解读与总结（/mood 接口就用它）',
+  )
+}
+
 // ── 反思轮（记忆 + 情绪一次调用；四层闸门 + 每 N 轮一次）────────────────────
 const turnStopping = handlers.get('agent/turn-stopping')
 const sessionEvent = handlers.get('session/event')

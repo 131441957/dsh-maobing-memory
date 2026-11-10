@@ -94,12 +94,23 @@ interface Hit {
   detail: { bm25: number; tag: number; strength: number; recency: number }
 }
 
+interface AxisReading {
+  value: number
+  delta: number
+  word: string
+  band: 'neutral' | 'slight' | 'clear'
+}
+
 interface MoodState {
   joy: number
   anger: number
   surprise: number
   disgust: number
   updated_at: number
+  /** host 算好的人话（每轴一个），老版本接口没有这个字段 → 可选 */
+  readings?: Partial<Record<'joy' | 'anger' | 'surprise' | 'disgust', AxisReading>>
+  /** 一句总结，例如「当前：明显偏忐忑（另有 1 轴略微偏移）」 */
+  summary?: string
 }
 
 interface MergePair {
@@ -201,21 +212,72 @@ function StatCard({ label, value, hint, tone }: { label: string; value: string |
   )
 }
 
-function MoodBar({ label, value, tone }: { label: string; value: number; tone: string }): unknown {
-  const pct = Math.max(0, Math.min(1, value)) * 100
+/**
+ * 情绪条：**以中点为轴的双极条**。
+ *
+ * 为什么不是 0→100% 的填充条：四轴是双极的，`value=0.28` 意味着「偏忐忑」，
+ * 而不是「只有 28% 的怒」。单向条让人把它读成进度，越看越糊涂。
+ * 现在从中点向偏离方向填色：往左 = 低端（恐/悲/意料中/嫌弃），往右 = 高端（怒/喜/出乎意料/认可）。
+ */
+function MoodBar({
+  label,
+  reading,
+  value,
+  tone,
+  ends,
+}: {
+  label: string
+  reading?: AxisReading
+  value: number
+  tone: string
+  /** [低端说法, 高端说法]，鼠标悬停时给提示 */
+  ends: [string, string]
+}): unknown {
+  const v = Math.max(0, Math.min(1, value))
+  const delta = reading ? reading.delta : Math.round((v - 0.5) * 100) / 100
+  const band = reading ? reading.band : Math.abs(delta) < 0.08 ? 'neutral' : 'slight'
+  const width = Math.min(50, Math.abs(delta) * 100)
+  const word = reading ? reading.word : Math.abs(delta) < 0.08 ? '平常心' : '略偏'
   return h(
     'div',
     { style: { display: 'flex', alignItems: 'center', gap: 8 } },
     h('span', { style: { fontSize: 12, color: T.text2, width: 16 } }, label),
     h(
       'div',
-      { style: { position: 'relative', flex: 1, height: 6, borderRadius: 3, background: T.card2, overflow: 'hidden' } },
-      h('div', { style: { width: `${pct}%`, height: '100%', background: tone, borderRadius: 3, transition: 'width .3s ease' } }),
+      {
+        title: `0 = ${ends[0]} ←→ 1 = ${ends[1]}`,
+        style: { position: 'relative', flex: 1, height: 6, borderRadius: 3, background: T.card2, overflow: 'hidden' },
+      },
       h('div', {
-        style: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: T.border2, opacity: 0.6 },
+        style: {
+          position: 'absolute',
+          top: 0,
+          bottom: 0,
+          left: delta >= 0 ? '50%' : undefined,
+          right: delta < 0 ? '50%' : undefined,
+          width: `${width}%`,
+          background: tone,
+          opacity: band === 'clear' ? 1 : band === 'slight' ? 0.75 : 0.35,
+        },
+      }),
+      h('div', {
+        style: { position: 'absolute', left: '50%', top: 0, bottom: 0, width: 1, background: T.border2, opacity: 0.7 },
       }),
     ),
-    h('span', { style: { fontSize: 11.5, color: T.text2, width: 34, textAlign: 'right', fontVariantNumeric: 'tabular-nums' } }, value.toFixed(2)),
+    h(
+      'span',
+      {
+        style: {
+          fontSize: 11.5,
+          color: band === 'clear' ? T.text : T.text2,
+          fontWeight: band === 'clear' ? 600 : 400,
+          width: 86,
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+        },
+      },
+      `${word} ${delta >= 0 ? '+' : ''}${delta.toFixed(2)}`,
+    ),
   )
 }
 
@@ -959,18 +1021,25 @@ function MemoryPanel(): unknown {
             { style: { ...card } },
             h(
               'div',
-              { style: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10 } },
+              { style: { display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 10, flexWrap: 'wrap' } },
               h('div', { style: { fontSize: 13, fontWeight: 600, color: T.text } }, '当前情绪'),
               h('span', { style: { ...muted } }, '0.5 = 平常心；每 30 分钟自然回中'),
               h('span', { style: { flex: 1 } }),
               h('span', { style: { ...muted } }, mood.updated_at ? relTime(mood.updated_at) : '还没更新过'),
             ),
-            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
-              h(MoodBar, { label: '喜', value: mood.joy, tone: '#f59e0b' }),
-              h(MoodBar, { label: '怒', value: mood.anger, tone: '#ef4444' }),
-              h(MoodBar, { label: '惊', value: mood.surprise, tone: '#8b5cf6' }),
-              h(MoodBar, { label: '厌', value: mood.disgust, tone: '#10b981' }),
+            // 一句人话总结：光有四组数字没人看得懂（2026-11-10 用户反馈「分不清你现在什么情绪」）
+            h(
+              'div',
+              { style: { fontSize: 13, color: T.text, marginBottom: 10 } },
+              mood.summary ?? '（host 未返回解读，刷新页面或重启插件后可见）',
             ),
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 7 } },
+              h(MoodBar, { label: '喜', reading: mood.readings?.joy, value: mood.joy, tone: '#f59e0b', ends: ['偏丧', '偏开心'] }),
+              h(MoodBar, { label: '怒', reading: mood.readings?.anger, value: mood.anger, tone: '#ef4444', ends: ['偏忐忑', '偏火大'] }),
+              h(MoodBar, { label: '惊', reading: mood.readings?.surprise, value: mood.surprise, tone: '#8b5cf6', ends: ['意料之中', '出乎意料'] }),
+              h(MoodBar, { label: '厌', reading: mood.readings?.disgust, value: mood.disgust, tone: '#10b981', ends: ['偏嫌弃', '偏认可'] }),
+            ),
+            h('div', { style: { ...muted, marginTop: 8, fontSize: 11.5 } }, '条从中点向偏离方向填色：往左 = 低端说法，往右 = 高端说法（悬停可看两端含义）'),
           )
         : null,
       logInfo
