@@ -217,12 +217,8 @@ powershell -ExecutionPolicy Bypass -File scripts\uninstall.ps1 -DshHome "<DSH_HO
 npm install            # 装 esbuild / typescript
 npm run build          # 构建 → lib/
 npm run pack           # 打包 → dist/maobing-memory-<版本>.tgz
-node scripts/smoke.mjs # 冒烟测试（163 项，不启动 DSH）
+node scripts/smoke.mjs # 冒烟测试（172 项，不启动 DSH）
 node scripts/comment-audit.mjs # 注释体检：密度分类 + 列出可疑注释（承诺词/行号/版本号），干净时 exit 0
-
-# 从 meow-memory 迁移历史记忆（可选；必须给 --src，加 --go 才真写库）
-node scripts/migrate-from-meow.mjs --src "<meow 的 memory.db 路径>"
-node scripts/migrate-from-meow.mjs --src "<...>" --go
 ```
 
 目录结构：
@@ -238,7 +234,7 @@ src/notes.ts    笔记：文件读写、按行分页、append/replace
 src/logger.ts   文件日志（同步追加、2MB 滚动、写失败静默）
 src/client.ts   面板：侧栏图标 + 整页仪表盘 + 情绪/日志卡
 build.mjs       esbuild 出 lib/index.js 与 lib/client.js
-scripts/        smoke.mjs / comment-audit.mjs / pack.mjs / install.ps1 / uninstall.ps1 / migrate-from-meow.mjs
+scripts/        smoke.mjs / comment-audit.mjs / pack.mjs / install.ps1 / uninstall.ps1
 scripts/lib/    comment-scan.mjs（注释扫描：认得字符串与正则字面量）
 ```
 

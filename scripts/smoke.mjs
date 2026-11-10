@@ -598,7 +598,7 @@ sessionEvent(
 const reflectFound = await memSearch.execute({ query: '反思轮测试写入' }, {})
 ok(Number(reflectFound.count) >= 1, 'reflect: 反思结果里的记忆被写入库')
 
-// SOUL 行（meow 风格的反思输出：记忆用工具写，情绪单独一行）
+// SOUL 行（同类插件风格的反思输出：记忆用工具写，情绪单独一行）
 sessionEvent(
   { header: { id: 'sess-soul' } },
   {

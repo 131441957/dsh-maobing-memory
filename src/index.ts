@@ -661,7 +661,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
       //
       // 为什么是「前 k 条全文 + 若干条只给索引」，而不是简单的 top-N 全文：
       // 只给 top-N 时，正确答案排在第 N+1 位就等于不存在（2026-10-31 实测：问
-      // 「meow 的库现在叫什么」，答案 #1074 排第 4，而 N=3，模型于是去查了 GitHub）。
+      // 「这个库现在叫什么」，答案排第 4，而 N=3，模型于是去查了 GitHub）。
       // 调大 N 只是把边界往后推，成本却线性上涨；换成索引后，覆盖 11 条只花 1360 字，
       // 而且模型看到索引知道「库里还有这些」，需要细节会自己 memory_read。
       //
@@ -1281,7 +1281,7 @@ export async function apply(ctx: any, rawConfig: unknown): Promise<void> {
   const REFLECT_COOLDOWN_MS = 60_000
 
   /** 反思提示词（内嵌：esbuild 不打 .md；源码同份在 src/prompts/zh/reflect.md）。
-   *  骨架照 meow 的 reflect：让模型**自己调工具**查重与写入，情绪只作为副产品多输出一行。 */
+   *  骨架参考了同类记忆插件的反思做法：让模型**自己调工具**查重与写入，情绪只作为副产品多输出一行。 */
   const REFLECT_PROMPT = [
     '记忆反思任务（自动触发，不是用户在提问）',
     '',

@@ -118,7 +118,7 @@ export function effectiveMinScore(minScore: number, docCount: number): number {
  *
  * 前 k 条给全文（最可能是答案的），其余最多 indexLimit 条只给一行索引。
  * 这么改的原因（2026-10-31 实测）：只注入 topK 条时，正确答案排第 4 就等于不存在
- * （问「meow 的库现在叫什么」，#1074 排第 4 被丢掉，模型转头去查 GitHub）。
+ * （问「这个库现在叫什么」，正确答案排第 4 被丢掉，模型转头去查 GitHub）。
  * 给索引能让模型知道「库里还有这些」，需要细节再 memory_read——覆盖从 3 条提到 25 条。
  *
  * `minScore`（总分门槛，默认 6）再砍一刀：总分 =（BM25 + 标签）× 重要 × 强度 × 新鲜度，
@@ -161,8 +161,8 @@ export function buildHits(
       if (!row) continue
       const flat = String(row.judgment).replace(/\s+/g, ' ')
       // 标签是天然的关键词锚点，信息密度比判断句开头高得多（判断句往往先铺垫场景，
-      // 关键信息在中后段——例如 #1074 的「库改名 _removed」在第 4 个标签里，
-      // 而判断句前 40 字只是「meow-memory 与它的查看面板…」）。
+      // 关键信息在中后段——例如「库改名 _removed」这种关键事实常常在第 4 个标签里，
+      // 而判断句前 40 字只是「某插件与它的查看面板…」）。
       const tagList = Array.isArray(row.tags) ? row.tags.slice(0, 4) : []
       const tagPart = tagList.length > 0 ? `${tagList.join(' / ')} ｜ ` : ''
       parts.push(`#${row.id} [${row.project}] ${tagPart}${flat.slice(0, 32)}${flat.length > 32 ? '…' : ''}`)
